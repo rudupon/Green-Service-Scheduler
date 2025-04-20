@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: home-energy-config
+  namespace: edge-computing
+data:
+  location: "home"
+  solar-peak-hours: "10:00-16:00"
+  energy-prediction-update-interval: "5s"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tom-energy-config
+  namespace: edge-computing
+data:
+  location: "tom"
+  solar-peak-hours: "09:30-15:30"
+  energy-prediction-update-interval: "5s"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ktn-energy-config
+  namespace: edge-computing
+data:
+  location: "ktn"
+  solar-peak-hours: "10:30-16:30"
+  energy-prediction-update-interval: "5s"
