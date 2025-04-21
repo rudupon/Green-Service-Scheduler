@@ -6,7 +6,7 @@ metadata:
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: node-controller-role
 rules:
@@ -19,14 +19,15 @@ rules:
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: node-controller-binding
+  namespace: edge-computing
 subjects:
 - kind: ServiceAccount
   name: node-controller
   namespace: edge-computing
 roleRef:
-  kind: ClusterRole
+  kind: Role
   name: node-controller-role
   apiGroup: rbac.authorization.k8s.io

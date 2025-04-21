@@ -5,7 +5,7 @@ import time
 logger = logging.getLogger("ServiceClients")
 
 class PredictionServiceClient:
-    def __init__(self, host="prediction-service", port=80, max_retries=3):
+    def __init__(self, host="localhost", port=8000, max_retries=3):
         self.base_url = f"http://{host}:{port}"
         self.max_retries = max_retries
         self.available = False
@@ -53,7 +53,7 @@ class PredictionServiceClient:
         return predictions.tolist()
 
 class SchedulerServiceClient:
-    def __init__(self, host="scheduler-service", port=80, max_retries=3):
+    def __init__(self, host="localhost", port=8001, max_retries=3):
         self.base_url = f"http://{host}:{port}"
         self.max_retries = max_retries
         self.available = False
