@@ -166,7 +166,7 @@ class NodeController:
         
         container = client.V1Container(
             name="task-container",
-            image="gitlab.stud.atlantis.ugent.be/rdupon/mp/dummy-task:latest",
+            image="gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/dummy-task:latest",
             env=[
                 client.V1EnvVar(name="TASK_PARAMS", value=json.dumps(task_params))
             ]
