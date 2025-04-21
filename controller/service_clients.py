@@ -12,7 +12,6 @@ class PredictionServiceClient:
         self.check_service_available()
     
     def check_service_available(self):
-        """Controleer of de prediction service beschikbaar is"""
         for attempt in range(self.max_retries):
             try:
                 response = requests.get(f"{self.base_url}/health")
@@ -29,7 +28,6 @@ class PredictionServiceClient:
         return False
     
     def predict_energy(self, historical_data=None):
-        """Haal energievoorspelling op van de service"""
         if not self.available:
             logger.warning("Prediction service niet beschikbaar, gebruik fallback voorspelling")
             return self._fallback_prediction()
@@ -48,7 +46,6 @@ class PredictionServiceClient:
             return self._fallback_prediction()
     
     def _fallback_prediction(self):
-        """Eenvoudige fallback voorspelling"""
         import numpy as np
         # Genereer een basislijn voor 1 uur (720 samples per 5 seconden)
         timestamps = np.arange(720)
@@ -63,7 +60,6 @@ class SchedulerServiceClient:
         self.check_service_available()
     
     def check_service_available(self):
-        """Controleer of de scheduler service beschikbaar is"""
         for attempt in range(self.max_retries):
             try:
                 response = requests.get(f"{self.base_url}/health")
@@ -80,7 +76,6 @@ class SchedulerServiceClient:
         return False
     
     def find_optimal_time(self, task_params, energy_prediction):
-        """Vraag de scheduler service om de optimale uitvoertijd te bepalen"""
         if not self.available:
             logger.warning("Scheduler service niet beschikbaar, gebruik fallback scheduling")
             return self._fallback_scheduling(task_params)
@@ -99,7 +94,6 @@ class SchedulerServiceClient:
             return self._fallback_scheduling(task_params)
     
     def _fallback_scheduling(self, task_params):
-        """Eenvoudige fallback scheduling"""
         from datetime import datetime, timedelta
         max_delay_seconds = task_params.get("max_delay", 3600)
         # Eenvoudige strategie: plan op 70% van max delay
