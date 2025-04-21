@@ -23,8 +23,8 @@ spec:
               fieldPath: spec.nodeName
         - name: SCHEDULER_SERVICE_HOST
           value: "localhost"
-        #- name: PREDICTION_SERVICE_HOST
-        #  value: "localhost"
+        - name: PREDICTION_SERVICE_HOST
+          value: "localhost"
         resources:
           limits:
             cpu: "500m"
@@ -38,6 +38,10 @@ spec:
         ports:
         - containerPort: 8001
         env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         - name: FLASK_APP
           value: "scheduler_service.py"
         - name: FLASK_PORT
@@ -49,5 +53,33 @@ spec:
           requests:
             cpu: "100m"
             memory: "256Mi"
+    
+      - name: prediction-service
+        image: gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/prediction-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: FLASK_APP
+          value: "prediction_service.py"
+        - name: FLASK_PORT
+          value: "8000"
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /app/models
+
+      volumes:
+      - name: model-storage
+        emptyDir: {}
       imagePullSecrets:
         - name: gitlab-ugent-registry
