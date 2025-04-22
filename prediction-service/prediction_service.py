@@ -21,7 +21,9 @@ def load_model():
     try:
         if os.path.exists(model_path):
             logger.info(f"Model gevonden op pad: {model_path}")
-            model = tf.keras.models.load_model(model_path)
+            interpreter = tf.lite.Interpreter(model_path=model_path)
+            interpreter.allocate_tensors()
+            model = interpreter  # Store the interpreter as your model
             logger.info("LSTM model succesvol geladen")
             return True
         else:
@@ -52,12 +54,6 @@ def preprocess_data(historical_data=None):
 def generate_prediction(historical_data=None):
     """
     Genereer een voorspelling voor de komende uur met 5-seconden granulariteit.
-    
-    Args:
-        historical_data: Lijst met historische metingen (optioneel)
-        
-    Returns:
-        List met 720 voorspelde waarden (1 uur aan 5s intervallen)
     """
     if model is None:
         success = load_model()
@@ -68,7 +64,22 @@ def generate_prediction(historical_data=None):
     try:
         model_input = preprocess_data(historical_data)
         
-        prediction = model.predict(model_input)[0]  # Shape: (720,)
+        # Get input and output details from the interpreter
+        input_details = model.get_input_details()
+        output_details = model.get_output_details()
+        
+        # Ensure the input is in the correct format for TFLite
+        # You might need to adjust this depending on your model's expected input
+        model_input = model_input.astype(np.float32)
+        
+        # Set the tensor data
+        model.set_tensor(input_details[0]['index'], model_input)
+        
+        # Run the inference
+        model.invoke()
+        
+        # Get the prediction output
+        prediction = model.get_tensor(output_details[0]['index'])[0]
         
         prediction = np.clip(prediction, 0, 1)
         

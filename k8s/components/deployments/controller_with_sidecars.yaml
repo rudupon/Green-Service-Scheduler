@@ -74,12 +74,6 @@ spec:
           requests:
             cpu: "200m"
             memory: "512Mi"
-        volumeMounts:
-        - name: model-storage
-          mountPath: /app/models
 
-      volumes:
-      - name: model-storage
-        emptyDir: {}
       imagePullSecrets:
         - name: gitlab-ugent-registry
