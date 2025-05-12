@@ -18,13 +18,18 @@ def schedule_task():
     data = request.json
     if not data:
         return jsonify({"error": "Geen JSON data ontvangen"}), 400
-
+    
     task_params = data.get("task_params")
     energy_prediction = data.get("energy_prediction")
+    
     if not task_params or not energy_prediction:
-        return jsonify({"error", "Missende task_params of energy_prediction"}), 400
-
+        return jsonify({"error": "Missende task_params of energy_prediction"}), 400  # Syntaxfout gecorrigeerd
+    
     try:
+        # Valideer energy_prediction
+        if not isinstance(energy_prediction, list) or len(energy_prediction) == 0:
+            return jsonify({"error": "energy_prediction moet een niet-lege lijst zijn"}), 400
+            
         optimal_time = find_optimal_execution_time(task_params, energy_prediction)
         return jsonify({"optimal_time": optimal_time}), 200
     except Exception as e:
@@ -33,7 +38,7 @@ def schedule_task():
 
 def find_optimal_execution_time(task_params, energy_prediction):
     """
-    Algoritme dat het optimale uitvoeringsmoment bepaalt.
+    Verbeterd algoritme dat het optimale uitvoeringsmoment bepaalt.
     
     Parameters:
     - task_params: Dict met taakparameters (energy_requirement, priority, max_delay, duration)
@@ -42,38 +47,55 @@ def find_optimal_execution_time(task_params, energy_prediction):
     Returns:
     - ISO-geformatteerde string met optimale uitvoeringstijd
     """
+    # Haal parameters op met betere validatie
     energy_requirement = float(task_params.get('energy_requirement', 1.0))
     priority = int(task_params.get('priority', 1))
     max_delay_seconds = int(task_params.get('max_delay', 3600))  # standaard max 1 uur uitstel
-    duration_seconds = int(task_params.get('duration', 100))     # standaard 100 seconden durende taak
+    duration_seconds = max(int(task_params.get('duration', 100)), 5)  # minimum 5 seconden (1 sample)
     
     # Bereken hoeveel datapunten nodig zijn voor de taakduur (bij 5s granulariteit)
-    duration_samples = duration_seconds // 5
+    duration_samples = max(1, duration_seconds // 5)  # Minimum 1 sample
     energy_array = np.array(energy_prediction)
     
-    # Bereken de optimale startindex door te kijken naar gemiddelde energie over taakduur
-    best_score = -float('inf')
-    best_start_index = 0
+    # Controleer of we genoeg voorspellingen hebben
+    if len(energy_array) < duration_samples:
+        raise ValueError(f"Niet genoeg energie-voorspellingen voor taakduur van {duration_seconds} seconden")
     
     # Max aantal stappen dat we vooruit kunnen kijken (beperkt door max_delay en voorspellingslengte)
-    max_steps = min(max_delay_seconds // 5, len(energy_array) - duration_samples)
+    max_steps = max(1, min(max_delay_seconds // 5, len(energy_array) - duration_samples))
+    
+    # Bereken de optimale startindex door rekening te houden met energy_requirement
+    best_score = -float('inf')
+    best_start_index = 0
     
     for start_idx in range(max_steps):
         window = energy_array[start_idx:start_idx + duration_samples]
         
-        # Bereken score gebaseerd op gemiddelde energie, prioriteit en wachttijd
-        # Hogere prioriteit → meer belang aan direct uitvoeren (minder uitstel)
-        avg_energy = np.mean(window)
-        delay_penalty = (start_idx * 5) / max_delay_seconds  # Genormaliseerde vertraging (0-1)
+        # Controleer of de energie op elk moment boven de vereiste drempel ligt
+        if np.min(window) < energy_requirement:
+            continue  # Skip dit tijdsvenster als er niet genoeg energie is op enig moment
         
-        # Score is een combinatie van energiebeschikbaarheid en urgentie
-        # Bij hoge prioriteit weegt delay_penalty zwaarder
-        priority_factor = priority / 10  # Normaliseer prioriteit (prioriteit is 1-10)
-        score = avg_energy - (delay_penalty * priority_factor)
+        # Bereken scores op een beter gebalanceerde manier
+        avg_energy_ratio = np.mean(window) / energy_requirement  # Hoe hoger boven minimum, hoe beter
+        delay_factor = 1.0 - (start_idx * 5 / max_delay_seconds)  # 1.0 bij start, aflopend naar 0.0
+        
+        # Bepaal gewichten op basis van prioriteit (1-10)
+        priority_normalized = priority / 10.0  # Normaliseren naar 0.1-1.0
+        energy_weight = 1.0 - priority_normalized  # Lager bij hoge prioriteit
+        delay_weight = priority_normalized        # Hoger bij hoge prioriteit
+        
+        # Gewogen score (0-1 range voor beide componenten)
+        score = (energy_weight * avg_energy_ratio) + (delay_weight * delay_factor)
         
         if score > best_score:
             best_score = score
             best_start_index = start_idx
+    
+    # Als geen geschikte tijd is gevonden (alle tijden onder energy_requirement)
+    if best_score == -float('inf'):
+        logger.warning("Geen optimale tijd gevonden die voldoet aan energy_requirement")
+        # Val terug op beste optie, zelfs onder energy_requirement
+        best_start_index, best_score = find_best_fallback(energy_array, duration_samples, max_steps, energy_requirement, priority)
     
     # Bereken optimale tijd (huidige tijd + beste start in seconden)
     optimal_seconds = best_start_index * 5
@@ -82,6 +104,27 @@ def find_optimal_execution_time(task_params, energy_prediction):
     logger.info(f"Optimale tijd voor taak: {optimal_time.isoformat()}, score: {best_score:.4f}")
     
     return optimal_time.isoformat()
+
+def find_best_fallback(energy_array, duration_samples, max_steps, energy_requirement, priority):
+    """
+    Vind de beste fallback optie wanneer geen enkel tijdvenster aan de energy_requirement voldoet.
+    """
+    best_start_index = 0
+    best_energy_ratio = 0
+    
+    for start_idx in range(max_steps):
+        window = energy_array[start_idx:start_idx + duration_samples]
+        # Bereken hoeveel % van energy_requirement we gemiddeld halen
+        energy_ratio = np.mean(window) / energy_requirement
+        
+        # Bij gelijke prioriteit, kies vroegste tijd. Bij hoge prioriteit, kies hoogste energie
+        score = energy_ratio if priority > 5 else energy_ratio - (start_idx / max_steps)
+        
+        if score > best_energy_ratio:
+            best_energy_ratio = score
+            best_start_index = start_idx
+    
+    return best_start_index, best_energy_ratio
 
 if __name__ == "__main__":
     logger.info("Scheduler Service wordt gestart...")
