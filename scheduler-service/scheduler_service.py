@@ -110,21 +110,27 @@ def find_best_fallback(energy_array, duration_samples, max_steps, energy_require
     Vind de beste fallback optie wanneer geen enkel tijdvenster aan de energy_requirement voldoet.
     """
     best_start_index = 0
-    best_energy_ratio = 0
+    best_score = -float('inf')
     
     for start_idx in range(max_steps):
         window = energy_array[start_idx:start_idx + duration_samples]
         # Bereken hoeveel % van energy_requirement we gemiddeld halen
         energy_ratio = np.mean(window) / energy_requirement
         
-        # Bij gelijke prioriteit, kies vroegste tijd. Bij hoge prioriteit, kies hoogste energie
-        score = energy_ratio if priority > 5 else energy_ratio - (start_idx / max_steps)
+        # Dezelfde prioriteitslogica toepassen als in de hoofdfunctie
+        priority_normalized = priority / 10.0  # Normaliseren naar 0.1-1.0
+        energy_weight = 1.0 - priority_normalized  # Lager bij hoge prioriteit
+        delay_factor = 1.0 - (start_idx * 5 / max_steps)  # 1.0 bij start, aflopend naar 0.0
+        delay_weight = priority_normalized  # Hoger bij hoge prioriteit
         
-        if score > best_energy_ratio:
-            best_energy_ratio = score
+        # Consistente score berekening met de hoofdfunctie
+        score = (energy_weight * energy_ratio) + (delay_weight * delay_factor)
+        
+        if score > best_score:
+            best_score = score
             best_start_index = start_idx
     
-    return best_start_index, best_energy_ratio
+    return best_start_index, best_score
 
 if __name__ == "__main__":
     logger.info("Scheduler Service wordt gestart...")
