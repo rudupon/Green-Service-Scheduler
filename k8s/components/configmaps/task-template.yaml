@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: testtaak-1
+  namespace: edge-computing
+  labels:
+    target-node: 75d09997-8f8f-42d2-ab01-md-0-lj2dx-xv7jf 
+    processed: "false"
+data:
+  energy_requirement: "1.5"  # Relatieve energie-eis
+  priority: "3"              # 1-10, hogere waarde = hogere prioriteit
+  max_delay: "600"           # Maximale vertraging in seconden (10 minuten)
+  duration: "120"            # Verwachte duur in seconden

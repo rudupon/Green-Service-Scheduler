@@ -89,7 +89,7 @@ class NodeController:
             "priority": int(config_map.data.get("priority", "1")),
             "max_delay": int(config_map.data.get("max_delay", "3600")),
             "duration": int(config_map.data.get("duration", "100")),
-            "created_at": datetime.now()
+            "created_at": datetime.now().isoformat()
         }
         self.mark_configmap_as_processed(name, namespace)
         self.schedule_task(task_params)
@@ -177,7 +177,8 @@ class NodeController:
             spec=client.V1PodSpec(
                 restart_policy="Never",
                 containers=[container],
-                node_selector={"kubernetes.io/hostname": self.node_name}
+                node_selector={"kubernetes.io/hostname": self.node_name},
+                image_pull_secrets=[client.V1LocalObjectReference(name="gitlab-ugent-registry")]
             )
         )
         

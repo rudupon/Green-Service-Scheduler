@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Groene Scheduler - Taak Aanmaken</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #2a7e19;
+            text-align: center;
+        }
+        .form-container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .slider-container {
+            display: flex;
+            align-items: center;
+        }
+        .slider {
+            flex-grow: 1;
+            margin-right: 10px;
+        }
+        .slider-value {
+            width: 40px;
+            text-align: center;
+        }
+        button {
+            background-color: #2a7e19;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        button:hover {
+            background-color: #1f5e13;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+            display: block;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            display: block;
+        }
+        .task-list {
+            margin-top: 30px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    <h1>Groene Scheduler - Taak Aanmaken</h1>
+    
+    <div class="form-container">
+        <form id="taskForm">
+            <div class="form-group">
+                <label for="taskName">Taaknaam:</label>
+                <input type="text" id="taskName" required placeholder="Voer een unieke taaknaam in">
+            </div>
+            
+            <div class="form-group">
+                <label for="nodeSelect">Doelnode:</label>
+                <select id="nodeSelect" required>
+                    <option value="">Selecteer een node</option>
+                    <!-- Nodes worden dynamisch ingevuld via JavaScript -->
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="energyRequirement">Energie-eis (0.1-1.0):</label>
+                <div class="slider-container">
+                    <input type="range" id="energyRequirement" class="slider" min="0.1" max="1.0" step="0.1" value="0.5">
+                    <span id="energyValue" class="slider-value">0.5</span>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="priority">Prioriteit (1-10):</label>
+                <div class="slider-container">
+                    <input type="range" id="priority" class="slider" min="1" max="10" step="1" value="5">
+                    <span id="priorityValue" class="slider-value">5</span>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="maxDelay">Maximale vertraging (seconden):</label>
+                <input type="number" id="maxDelay" min="0" value="3600" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="duration">Verwachte looptijd (seconden):</label>
+                <input type="number" id="duration" min="1" value="60" required>
+            </div>
+            
+            <button type="submit">Taak Aanmaken</button>
+        </form>
+        
+        <div id="status" class="status"></div>
+    </div>
+    
+    <div class="task-list">
+        <h2>Recente Taken</h2>
+        <table id="tasksTable">
+            <thead>
+                <tr>
+                    <th>Naam</th>
+                    <th>Node</th>
+                    <th>Status</th>
+                    <th>Aangemaakt op</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Taken worden dynamisch ingevuld via JavaScript -->
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        // Bijwerken van de sliderwaarden
+        document.getElementById('energyRequirement').addEventListener('input', function() {
+            document.getElementById('energyValue').textContent = this.value;
+        });
+        
+        document.getElementById('priority').addEventListener('input', function() {
+            document.getElementById('priorityValue').textContent = this.value;
+        });
+        
+        // API endpoints
+        const API_BASE_URL = '';  // Relatief aan deze pagina
+        
+        // Ophalen van beschikbare nodes
+        async function loadNodes() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/nodes`);
+                if (!response.ok) throw new Error('Kan nodes niet ophalen');
+                
+                const nodes = await response.json();
+                const nodeSelect = document.getElementById('nodeSelect');
+                
+                // Reset opties
+                nodeSelect.innerHTML = '<option value="">Selecteer een node</option>';
+                
+                // Voeg nieuwe opties toe
+                nodes.forEach(node => {
+                    const option = document.createElement('option');
+                    option.value = node.name;
+                    option.textContent = node.name;
+                    nodeSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Fout bij het ophalen van nodes:', error);
+                // Fallback nodes (je kunt deze aanpassen aan je werkelijke nodes)
+                const fallbackNodes = ['worker-1', 'worker-2', 'worker-3'];
+                const nodeSelect = document.getElementById('nodeSelect');
+                
+                // Reset opties
+                nodeSelect.innerHTML = '<option value="">Selecteer een node</option>';
+                
+                // Voeg fallback opties toe
+                fallbackNodes.forEach(nodeName => {
+                    const option = document.createElement('option');
+                    option.value = nodeName;
+                    option.textContent = nodeName;
+                    nodeSelect.appendChild(option);
+                });
+            }
+        }
+        
+        // Aanmaken van een taak
+        async function createTask(taskData) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/tasks`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(taskData)
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.message || 'Fout bij het aanmaken van de taak');
+                }
+                
+                return await response.json();
+            } catch (error) {
+                console.error('Fout bij het aanmaken van de taak:', error);
+                throw error;
+            }
+        }
+        
+        // Ophalen van recente taken
+        async function loadTasks() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/tasks`);
+                if (!response.ok) throw new Error('Kan taken niet ophalen');
+                
+                const tasks = await response.json();
+                const tasksTable = document.getElementById('tasksTable').querySelector('tbody');
+                
+                // Reset tabel
+                tasksTable.innerHTML = '';
+                
+                // Voeg taken toe
+                tasks.forEach(task => {
+                    const row = document.createElement('tr');
+                    
+                    // Taaknaam
+                    const nameCell = document.createElement('td');
+                    nameCell.textContent = task.name;
+                    row.appendChild(nameCell);
+                    
+                    // Node
+                    const nodeCell = document.createElement('td');
+                    nodeCell.textContent = task.node;
+                    row.appendChild(nodeCell);
+                    
+                    // Status
+                    const statusCell = document.createElement('td');
+                    statusCell.textContent = task.status || 'Gepland';
+                    row.appendChild(statusCell);
+                    
+                    // Aanmaakdatum
+                    const dateCell = document.createElement('td');
+                    dateCell.textContent = new Date(task.created_at).toLocaleString();
+                    row.appendChild(dateCell);
+                    
+                    tasksTable.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Fout bij het ophalen van taken:', error);
+            }
+        }
+        
+        // Formulierverwerking
+        document.getElementById('taskForm').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            
+            const taskData = {
+                name: document.getElementById('taskName').value,
+                node: document.getElementById('nodeSelect').value,
+                energy_requirement: document.getElementById('energyRequirement').value,
+                priority: document.getElementById('priority').value,
+                max_delay: document.getElementById('maxDelay').value,
+                duration: document.getElementById('duration').value
+            };
+            
+            const statusElement = document.getElementById('status');
+            statusElement.className = 'status';
+            statusElement.textContent = 'Taak wordt aangemaakt...';
+            
+            try {
+                const result = await createTask(taskData);
+                statusElement.className = 'status success';
+                statusElement.textContent = `Taak "${taskData.name}" is succesvol aangemaakt en ingepland!`;
+                
+                // Reset formulier
+                document.getElementById('taskForm').reset();
+                document.getElementById('energyValue').textContent = '0.5';
+                document.getElementById('priorityValue').textContent = '5';
+                
+                // Laad de bijgewerkte takenlijst
+                await loadTasks();
+            } catch (error) {
+                statusElement.className = 'status error';
+                statusElement.textContent = `Fout: ${error.message}`;
+            }
+        });
+        
+        // Initialisatie
+        window.addEventListener('DOMContentLoaded', function() {
+            loadNodes();
+            loadTasks();
+            
+            // Refresh taken elke 30 seconden
+            setInterval(loadTasks, 30000);
+        });
+    </script>
+</body>
+</html>

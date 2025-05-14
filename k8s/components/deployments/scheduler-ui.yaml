@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler-ui
+  namespace: edge-computing
+  labels:
+    app: scheduler-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scheduler-ui
+  template:
+    metadata:
+      labels:
+        app: scheduler-ui
+    spec:
+      serviceAccountName: scheduler-ui-account
+      containers:
+      - name: scheduler-ui
+        image: gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/scheduler-ui:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NAMESPACE
+          value: edge-computing
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+      imagePullSecrets:
+      - name: gitlab-ugent-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scheduler-ui-service
+  namespace: edge-computing
+spec:
+  selector:
+    app: scheduler-ui
+  ports:
+  - port: 80
+    targetPort: 3000
+  type: NodePort

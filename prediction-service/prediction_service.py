@@ -34,20 +34,16 @@ def load_model():
         return False
 
 def preprocess_data(historical_data=None):
-    """
-    Bereid data voor voor het model.
-    Als er geen historische data is, genereer dan een standaard input.
-    """
-    if historical_data is None or len(historical_data) < 24:
+    if historical_data is None or len(historical_data) < 144:
         logger.info("Geen historische data ontvangen, genereren van synthetische data")
-        t = np.linspace(0, 2*np.pi, 24)
+        t = np.linspace(0, 2*np.pi, 144)
         synthetic_data = 0.5 + 0.5 * np.sin(t)
-        model_input = synthetic_data.reshape(1, 24, 1)  # Vorm: (1, 24, 1)
+        model_input = synthetic_data.reshape(1, 144, 1)  # Vorm: (1, 144, 1)
     else:
-        # Gebruik de laatste 24 waarden (2 minuten aan 5s samples)
+        # Gebruik de laatste 144 waarden (12 minuten aan 5s samples)
         logger.info(f"Preprocessing van {len(historical_data)} datapunten")
-        recent_data = historical_data[-24:]
-        model_input = np.array(recent_data).reshape(1, 24, 1)  # Vorm: (1, 24, 1)
+        recent_data = historical_data[-144:]
+        model_input = np.array(recent_data).reshape(1, 144, 1)  # Vorm: (1, 144, 1)
     
     return model_input
 
