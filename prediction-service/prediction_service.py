@@ -3,6 +3,7 @@ import json
 import logging
 import numpy as np
 import tensorflow as tf
+import requests
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import time
@@ -14,6 +15,33 @@ app = Flask(__name__)
 
 model = None
 
+def get_latest_data(seconds=720):
+    """
+    Haalt de meest recente metingen op van de data-service.
+    
+    Parameters:
+        seconds (int): Aantal seconden aan historische data om op te halen
+                      (standaard 720 = 12 minuten)
+    
+    Returns:
+        list: De Power_Value metingen, of een lege lijst bij fout
+    """
+    try:
+        # Gebruik de Kubernetes service naam voor toegang tot de data-service
+        url = f"http://data-service:5000/latest?seconds={seconds}"
+        logger.info(f"Data ophalen van: {url}")
+        
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        logger.info(f"Data opgehaald: {data.get('samples', 0)} samples")
+        
+        return data.get("values", [])
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Fout bij ophalen data van data-service: {e}")
+        return []
+
 def load_model():
     global model
     model_path = os.path.join('models', 'lstm_model.tflite')
@@ -23,7 +51,7 @@ def load_model():
             logger.info(f"Model gevonden op pad: {model_path}")
             interpreter = tf.lite.Interpreter(model_path=model_path)
             interpreter.allocate_tensors()
-            model = interpreter  # Store the interpreter as your model
+            model = interpreter
             logger.info("LSTM model succesvol geladen")
             return True
         else:
@@ -60,21 +88,15 @@ def generate_prediction(historical_data=None):
     try:
         model_input = preprocess_data(historical_data)
         
-        # Get input and output details from the interpreter
         input_details = model.get_input_details()
         output_details = model.get_output_details()
         
-        # Ensure the input is in the correct format for TFLite
-        # You might need to adjust this depending on your model's expected input
         model_input = model_input.astype(np.float32)
         
-        # Set the tensor data
         model.set_tensor(input_details[0]['index'], model_input)
         
-        # Run the inference
         model.invoke()
         
-        # Get the prediction output
         prediction = model.get_tensor(output_details[0]['index'])[0]
         
         prediction = np.clip(prediction, 0, 1)
@@ -95,8 +117,24 @@ def generate_synthetic_prediction():
 def health_check():
     if model is None:
         load_model()    
-    status = "healthy" if model is not None else "unhealthy"
-    return jsonify({"status": status, "timestamp": datetime.now()}), 200 if status == "healthy" else 503
+    
+    # Controleer ook of data-service bereikbaar is
+    data_service_available = False
+    try:
+        response = requests.get("http://data-service:5000/health", timeout=3)
+        data_service_available = response.status_code == 200
+    except:
+        pass
+    
+    model_status = model is not None
+    status = "healthy" if model_status and data_service_available else "degraded" if model_status else "unhealthy"
+    
+    return jsonify({
+        "status": status, 
+        "model_loaded": model is not None,
+        "data_service_available": data_service_available,
+        "timestamp": datetime.now().isoformat()
+    }), 200 if status == "healthy" else 503
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -120,15 +158,19 @@ def predict():
     historical_data = data.get('historical_data')
     timestamp = data.get('timestamp', time.time())
     
-    # Genereer de voorspelling
+    # Als geen historical_data is meegegeven, probeer deze op te halen van de data-service
+    if historical_data is None:
+        logger.info("Geen historische data meegegeven, ophalen van data-service")
+        historical_data = get_latest_data(seconds=720)  # 12 minuten historische data
+    
     prediction = generate_prediction(historical_data)
     
-    # Bouw response
     response = {
         "prediction": prediction,
         "timestamp": timestamp,
         "prediction_time": datetime.now().isoformat(),
-        "prediction_duration_ms": (time.time() - start_time) * 1000
+        "prediction_duration_ms": (time.time() - start_time) * 1000,
+        "used_historical_data": len(historical_data) if historical_data else 0
     }
     
     logger.info(f"Voorspelling gemaakt in {response['prediction_duration_ms']:.2f}ms")

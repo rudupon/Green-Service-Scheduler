@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: data-service
+  namespace: edge-computing
+spec:
+  selector:
+    matchLabels:
+      app: data-service
+  template:
+    metadata:
+      labels:
+        app: data-service
+    spec:
+      containers:
+      - name: data-service
+        image: gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/data-service:latest
+        ports:
+        - containerPort: 5000
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: FLASK_APP
+          value: "data_service.py"
+        - name: FLASK_PORT
+          value: "5000"
+        - name: DATA_FILE
+          value: "/app/data/solar_data_cleaned_1-25_april_home.csv"
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+      imagePullSecrets:
+        - name: gitlab-ugent-registry
