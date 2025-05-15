@@ -23,15 +23,18 @@ def schedule_task():
     energy_prediction = data.get("energy_prediction")
     
     if not task_params or not energy_prediction:
-        return jsonify({"error": "Missende task_params of energy_prediction"}), 400  # Syntaxfout gecorrigeerd
+        return jsonify({"error": "Missende task_params of energy_prediction"}), 400
     
     try:
         # Valideer energy_prediction
         if not isinstance(energy_prediction, list) or len(energy_prediction) == 0:
             return jsonify({"error": "energy_prediction moet een niet-lege lijst zijn"}), 400
             
-        optimal_time = find_optimal_execution_time(task_params, energy_prediction)
-        return jsonify({"optimal_time": optimal_time}), 200
+        optimal_time, score = find_optimal_execution_time(task_params, energy_prediction)
+        return jsonify({
+            "optimal_time": optimal_time,
+            "score": score
+        }), 200
     except Exception as e:
         logger.error(f"Fout bij bepalen van optimale uitvoeringstijd: {e}")
         return jsonify({"error": str(e)}), 500
@@ -103,7 +106,7 @@ def find_optimal_execution_time(task_params, energy_prediction):
     
     logger.info(f"Optimale tijd voor taak: {optimal_time.isoformat()}, score: {best_score:.4f}")
     
-    return optimal_time.isoformat()
+    return optimal_time.isoformat(), best_score
 
 def find_best_fallback(energy_array, duration_samples, max_steps, energy_requirement, priority):
     """

@@ -78,7 +78,7 @@ class SchedulerServiceClient:
     def find_optimal_time(self, task_params, energy_prediction):
         if not self.available:
             logger.warning("Scheduler service niet beschikbaar, gebruik fallback scheduling")
-            return self._fallback_scheduling(task_params)
+            return self._fallback_scheduling(task_params), 0.0
         
         try:
             response = requests.post(f"{self.base_url}/schedule", json={
@@ -88,10 +88,10 @@ class SchedulerServiceClient:
             response.raise_for_status()
             
             data = response.json()
-            return data.get("optimal_time")
+            return data.get("optimal_time"), data.get("score", 0.0)
         except requests.exceptions.RequestException as e:
             logger.error(f"Fout bij ophalen optimale tijd: {e}")
-            return self._fallback_scheduling(task_params)
+            return self._fallback_scheduling(task_params), 0.0
     
     def _fallback_scheduling(self, task_params):
         from datetime import datetime, timedelta

@@ -140,6 +140,13 @@
                 <label for="duration">Verwachte looptijd (seconden):</label>
                 <input type="number" id="duration" min="1" value="60" required>
             </div>
+
+            <div class="form-group">
+                <label for="canMigrate">
+                    <input type="checkbox" id="canMigrate" checked>
+                    Toestaan dat deze taak naar andere nodes migreert
+                </label>
+            </div>
             
             <button type="submit">Taak Aanmaken</button>
         </form>
@@ -175,7 +182,7 @@
         });
         
         // API endpoints
-        const API_BASE_URL = '';  // Relatief aan deze pagina
+        const API_BASE_URL = '';
         
         // Ophalen van beschikbare nodes
         async function loadNodes() {
@@ -291,7 +298,8 @@
                 energy_requirement: document.getElementById('energyRequirement').value,
                 priority: document.getElementById('priority').value,
                 max_delay: document.getElementById('maxDelay').value,
-                duration: document.getElementById('duration').value
+                duration: document.getElementById('duration').value,
+                can_migrate: document.getElementById('canMigrate').checked
             };
             
             const statusElement = document.getElementById('status');

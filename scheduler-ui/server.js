@@ -64,7 +64,7 @@ app.get('/api/tasks', async (req, res) => {
 
 app.post('/api/tasks', async (req, res) => {
     try {
-        const { name, node, energy_requirement, priority, max_delay, duration } = req.body;
+        const { name, node, energy_requirement, priority, max_delay, duration, can_migrate } = req.body;
         
         // Validatie
         if (!name || !node || !energy_requirement || !priority || !max_delay || !duration) {
@@ -80,14 +80,16 @@ app.post('/api/tasks', async (req, res) => {
                 namespace: namespace,
                 labels: {
                     'target-node': node,
-                    'processed': 'false'
+                    'processed': 'false',
+                    'can-migrate': can_migrate ? 'true' : 'false'
                 }
             },
             data: {
                 energy_requirement: energy_requirement.toString(),
                 priority: priority.toString(),
                 max_delay: max_delay.toString(),
-                duration: duration.toString()
+                duration: duration.toString(),
+                can_migrate: (can_migrate ? 'true' : 'false')
             }
         };
         
@@ -96,7 +98,8 @@ app.post('/api/tasks', async (req, res) => {
         res.status(201).json({ 
             message: 'Taak succesvol aangemaakt',
             name,
-            node
+            node,
+            can_migrate
         });
     } catch (error) {
         console.error('Fout bij aanmaken taak:', error);
