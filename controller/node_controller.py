@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
 from service_clients import PredictionServiceClient, SchedulerServiceClient
+from flask import Flask, request, jsonify
+import requests
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("NodeController")
@@ -22,6 +24,9 @@ class NodeController:
         if not self.node_name:
             raise ValueError("NODE_NAME environment variable moet ingesteld zijn")
         
+        self.namespace = os.environ.get("NAMESPACE", "edge-computing")
+        self.controller_port = int(os.environ.get("CONTROLLER_PORT", "8002"))
+        
         logger.info(f"Node Controller gestart op node: {self.node_name}")
         
         self.task_queue = []
@@ -29,6 +34,54 @@ class NodeController:
         
         self.prediction_client = PredictionServiceClient()
         self.scheduler_client = SchedulerServiceClient()
+
+        # Flask app voor HTTP server
+        self.app = Flask(__name__)
+        self._setup_routes()
+
+    def _setup_routes(self):
+        """Configureer de Flask routes"""
+        
+        @self.app.route('/health', methods=['GET'])
+        def health_check():
+            return jsonify({
+                "status": "healthy", 
+                "node": self.node_name
+            }), 200
+        
+        @self.app.route('/api/prediction', methods=['POST'])
+        def handle_prediction_request():
+            data = request.json
+            if not data:
+                return jsonify({"error": "Geen data ontvangen"}), 400
+            
+            # Haal taakparameters op
+            task_params = {
+                "energy_requirement": float(data.get("energy_requirement", 1.0)),
+                "priority": int(data.get("priority", 1)),
+                "max_delay": int(data.get("max_delay", 3600)),
+                "duration": int(data.get("duration", 100)),
+            }
+            
+            try:
+                # Maak voorspelling met lokale prediction service
+                energy_prediction = self.prediction_client.predict_energy()
+                optimal_time_str, score = self.scheduler_client.find_optimal_time(task_params, energy_prediction)
+                
+                return jsonify({
+                    "prediction": energy_prediction,
+                    "optimal_time": optimal_time_str,
+                    "score": score,
+                    "node": self.node_name
+                })
+            except Exception as e:
+                logger.error(f"Fout bij maken voorspelling: {e}")
+                return jsonify({"error": str(e)}), 500
+    
+    def _start_flask_server(self):
+        """Start de Flask server in een aparte thread"""
+        logger.info(f"Flask server wordt gestart op poort {self.controller_port}")
+        self.app.run(host='0.0.0.0', port=self.controller_port)
     
     def start(self):
         logger.info("Controller wordt gestart")
@@ -37,7 +90,7 @@ class NodeController:
         
         threading.Thread(target=self.check_configmaps_periodically, daemon=True).start()
         
-        threading.Thread(target=self.check_prediction_requests_periodically, daemon=True).start()
+        threading.Thread(target=self._start_flask_server, daemon=True).start()
         
         # Blijf draaien
         try:
@@ -46,14 +99,6 @@ class NodeController:
         except KeyboardInterrupt:
             logger.info("Controller wordt gestopt")
 
-    def check_prediction_requests_periodically(self):
-        while True:
-            try:
-                self.check_for_prediction_requests()
-            except Exception as e:
-                logger.error(f"Fout bij controleren van prediction requests: {e}")
-            
-            time.sleep(5)  # Elke 5 seconden controleren
     
     def check_services_availability(self):
         while True:
@@ -190,16 +235,17 @@ class NodeController:
             logger.error(f"Ongeldige tijdformaat ontvangen: {local_time_str}")
             best_time = datetime.now() + timedelta(seconds=60)  # Fallback
         
-        # Looptijd voor gemakkelijke logging
+        # Voor gemakkelijke logging
         best_time_str = local_time_str
+        best_score = local_score
         
-        # Voor elke andere node, voorspellingen opvragen via Control Plane
+        # Voor elke andere node, voorspellingen opvragen via HTTP
         for node in nodes:
             if node == self.node_name:
                 continue  # Skip huidige node, die hebben we al
             
             try:
-                # Voorspelling opvragen van andere node
+                # Voorspelling opvragen van andere node via HTTP
                 node_prediction, node_time_str, node_score = self.get_prediction_from_node(node, task_params)
                 
                 # Converteer naar datetime-object voor vergelijking
@@ -211,15 +257,16 @@ class NodeController:
                 
                 logger.info(f"Voorspelling van node {node}: tijd={node_time_str}, score={node_score}")
                 
-                # Vergelijk op basis van absolute tijd (vroegste tijd wint)
-                if node_time < best_time:
+                # Vergelijk scores om de beste node te bepalen
+                if node_score > best_score:
                     best_node = node
                     best_time = node_time
                     best_time_str = node_time_str
+                    best_score = node_score
             except Exception as e:
                 logger.error(f"Fout bij opvragen voorspelling van node {node}: {e}")
         
-        logger.info(f"Beste node voor taak {task_params['name']}: {best_node} (starttijd: {best_time_str})")
+        logger.info(f"Beste node voor taak {task_params['name']}: {best_node} (starttijd: {best_time_str}, score: {best_score})")
         return best_node, best_time_str
 
     def get_cluster_nodes(self):
@@ -242,98 +289,41 @@ class NodeController:
 
     def get_prediction_from_node(self, node_name, task_params):
         """
-        Vraagt een voorspelling op van een specifieke node via het Control Plane.
-        Deze functie maakt een tijdelijke ConfigMap aan om de vraag te stellen,
-        en wacht vervolgens op een antwoord via een andere ConfigMap.
-        
-        Returns:
-            tuple: (voorspelling, optimale_tijd, score)
+        Vraagt een voorspelling op van een specifieke node via HTTP.
         """
         logger.info(f"Voorspelling opvragen van node {node_name}")
-    
-        task_short_name = task_params['name'][:8].rstrip('-')  # Eerste 8 karakters
-        node_short_name = node_name.split('-')[-1][:8].rstrip('-')  # Laatste component, eerste 8 tekens
-        timestamp = str(int(time.time()) % 10000)  # Laatste 4 cijfers van timestamp
         
-        # Kortere, unieke namen genereren
-        request_name = f"req-{task_short_name}-{node_short_name}-{timestamp}"
-        response_name = f"resp-{task_short_name}-{node_short_name}-{timestamp}"
-        
-        # Controleer dat de naam geldig is (max 63 tekens)
-        if len(response_name) > 63:
-            logger.warning(f"Response naam te lang ({len(response_name)} tekens), zal worden ingekort")
-            response_name = response_name[:63]
-        
-        # ConfigMap aanmaken voor vraag
-        request_cm = {
-            'apiVersion': 'v1',
-            'kind': 'ConfigMap',
-            'metadata': {
-                'name': request_name,
-                'namespace': task_params['namespace'],
-                'labels': {
-                    'target-node': node_name,
-                    'request-type': 'prediction',
-                    'response-name': response_name,
-                    'processed': 'false'
-                }
-            },
-            'data': {
-                'energy_requirement': str(task_params['energy_requirement']),
-                'priority': str(task_params['priority']),
-                'max_delay': str(task_params['max_delay']),
-                'duration': str(task_params['duration']),
-            }
-        }
-        
-        # Vraag ConfigMap aanmaken
         try:
-            self.core_api.create_namespaced_config_map(
-                namespace=task_params['namespace'],
-                body=request_cm
+            # Vind de pod die op deze node draait
+            pods = self.core_api.list_namespaced_pod(
+                namespace=self.namespace,
+                label_selector="app=edge-node-services",
+                field_selector=f"spec.nodeName={node_name}"
             )
-        except ApiException as e:
-            logger.error(f"Fout bij aanmaken prediction request ConfigMap: {e}")
-            raise
-        
-        # Wacht op antwoord ConfigMap (met timeout)
-        timeout = 30  # seconden
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            try:
-                # Check of response ConfigMap bestaat
-                response_cm = self.core_api.read_namespaced_config_map(
-                    name=response_name,
-                    namespace=task_params['namespace']
-                )
-                
-                # Parse response
-                prediction = json.loads(response_cm.data.get('prediction', '[]'))
-                optimal_time = response_cm.data.get('optimal_time', '')
-                score = float(response_cm.data.get('score', '0'))
-                
-                # Opruimen
-                try:
-                    self.core_api.delete_namespaced_config_map(
-                        name=response_name,
-                        namespace=task_params['namespace']
-                    )
-                except:
-                    logger.warning(f"Kon response ConfigMap {response_name} niet verwijderen")
-                
-                return prediction, optimal_time, score
-            except ApiException as e:
-                if e.status != 404:  # Anders dan Not Found
-                    logger.error(f"Fout bij controleren response ConfigMap: {e}")
-                    raise
-                
-                # Wacht even en probeer opnieuw
-                time.sleep(1)
-        
-        # Timeout bereikt
-        logger.warning(f"Timeout bij wachten op voorspelling van node {node_name}")
-        raise TimeoutError(f"Geen antwoord van node {node_name} binnen {timeout} seconden")
+            
+            if not pods.items:
+                logger.error(f"Geen pod gevonden op node {node_name}")
+                raise ValueError(f"Geen pod gevonden op node {node_name}")
+            
+            pod_ip = pods.items[0].status.pod_ip
+            
+            # Directe verbinding naar pod IP
+            service_url = f"http://{pod_ip}:{self.controller_port}/api/prediction"
+            
+            logger.info(f"HTTP-verzoek naar {service_url}")
+            
+            # Stuur HTTP-verzoek
+            response = requests.post(service_url, json=task_params, timeout=30)
+            response.raise_for_status()
+            
+            # Verwerk antwoord
+            data = response.json()
+            logger.info(f"Voorspelling ontvangen van node {node_name}")
+            
+            return data.get('prediction', []), data.get('optimal_time', ''), float(data.get('score', 0))
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Fout bij opvragen voorspelling van node {node_name}: {e}")
+            raise TimeoutError(f"Geen antwoord van node {node_name}: {str(e)}")
     
     def execute_task(self, task_params, target_node):
         name = task_params["name"]
@@ -391,90 +381,6 @@ class NodeController:
         )
         
         return job
-
-    def check_for_prediction_requests(self):
-        """Controleert op verzoeken van andere nodes voor voorspellingen"""
-        logger.info(f"Controleren op voorspellingsverzoeken voor node {self.node_name}")
-        
-        config_maps = self.core_api.list_namespaced_config_map(
-            namespace="edge-computing",
-            label_selector=f"target-node={self.node_name},request-type=prediction,processed=false"
-        )
-        
-        for config_map in config_maps.items:
-            try:
-                self.process_prediction_request(config_map)
-            except Exception as e:
-                logger.error(f"Fout bij verwerken van voorspellingsverzoek {config_map.metadata.name}: {e}")
-
-    def process_prediction_request(self, config_map):
-        """Verwerkt een voorspellingsverzoek van een andere node"""
-        logger.info(f"Verwerken van voorspellingsverzoek: {config_map.metadata.name}")
-        
-        response_name = config_map.metadata.labels.get('response-name')
-        if not response_name:
-            logger.error(f"Geen response-name in labels van ConfigMap {config_map.metadata.name}")
-            return
-        
-        # Controleer dat de respons-naam niet te lang is
-        if len(response_name) > 63:
-            logger.warning(f"Response naam te lang ({len(response_name)} tekens), zal worden ingekort")
-            response_name = response_name[:63]
-        
-        # Taakparameters ophalen
-        task_params = {
-            "energy_requirement": float(config_map.data.get("energy_requirement", "1.0")),
-            "priority": int(config_map.data.get("priority", "1")),
-            "max_delay": int(config_map.data.get("max_delay", "3600")),
-            "duration": int(config_map.data.get("duration", "100")),
-        }
-        
-        # Markeer het verzoek als verwerkt - LET OP: We gebruiken read_namespaced_config_map om de meest recente versie te krijgen
-        try:
-            latest_config_map = self.core_api.read_namespaced_config_map(
-                name=config_map.metadata.name,
-                namespace=config_map.metadata.namespace
-            )
-            
-            if not latest_config_map.metadata.labels:
-                latest_config_map.metadata.labels = {}
-            latest_config_map.metadata.labels['processed'] = 'true'
-            
-            self.core_api.patch_namespaced_config_map(
-                name=config_map.metadata.name,
-                namespace=config_map.metadata.namespace,
-                body=latest_config_map
-            )
-        except ApiException as e:
-            logger.error(f"Fout bij markeren van voorspellingsverzoek als verwerkt: {e}")
-        
-        # Voorspelling maken
-        energy_prediction = self.prediction_client.predict_energy()
-        optimal_time_str, score = self.scheduler_client.find_optimal_time(task_params, energy_prediction)
-        
-        # Antwoord ConfigMap aanmaken
-        response_cm = {
-            'apiVersion': 'v1',
-            'kind': 'ConfigMap',
-            'metadata': {
-                'name': response_name,
-                'namespace': config_map.metadata.namespace,
-            },
-            'data': {
-                'prediction': json.dumps(energy_prediction),
-                'optimal_time': optimal_time_str,
-                'score': str(score)
-            }
-        }
-        
-        try:
-            self.core_api.create_namespaced_config_map(
-                namespace=config_map.metadata.namespace,
-                body=response_cm
-            )
-            logger.info(f"Antwoord ConfigMap {response_name} aangemaakt")
-        except ApiException as e:
-            logger.error(f"Fout bij aanmaken van antwoord ConfigMap: {e}")
 
 
 def main():
