@@ -37,21 +37,23 @@ app.get('/api/nodes', async (req, res) => {
 
 app.get('/api/tasks', async (req, res) => {
     try {
-        const response = await k8sApi.listNamespacedConfigMap(
+        const batchApi = kc.makeApiClient(k8s.BatchV1Api);
+        
+        const response = await batchApi.listNamespacedJob(
             namespace,
             undefined, // pretty
             undefined, // allowWatchBookmarks
             undefined, // _continue
             undefined, // fieldSelector
-            'processed=true' // labelSelector
+            'type=green-task' // labelSelector
         );
         
-        const tasks = response.body.items.map(configMap => {
+        const tasks = response.body.items.map(job => {
             return {
-                name: configMap.metadata.name,
-                node: configMap.metadata.labels['target-node'] || 'onbekend',
-                status: 'Verwerkt',
-                created_at: configMap.metadata.creationTimestamp
+                name: job.metadata.name,
+                node: job.metadata.labels['target-node'] || 'onbekend',
+                status: job.metadata.labels['status'] || 'Wachtend',
+                created_at: job.metadata.creationTimestamp
             };
         });
         
@@ -71,29 +73,52 @@ app.post('/api/tasks', async (req, res) => {
             return res.status(400).json({ message: 'Alle velden zijn verplicht' });
         }
         
-        // Aanmaak ConfigMap
-        const configMap = {
-            apiVersion: 'v1',
-            kind: 'ConfigMap',
+        // Creëer een job definitie
+        const job = {
+            apiVersion: 'batch/v1',
+            kind: 'Job',
             metadata: {
                 name: name,
                 namespace: namespace,
                 labels: {
+                    'type': 'green-task',
+                    'status': 'pending-scheduling',
                     'target-node': node,
-                    'processed': 'false',
                     'can-migrate': can_migrate ? 'true' : 'false'
+                },
+                annotations: {
+                    'energy-requirement': energy_requirement.toString(),
+                    'priority': priority.toString(),
+                    'max-delay': max_delay.toString(),
+                    'duration': duration.toString()
                 }
             },
-            data: {
-                energy_requirement: energy_requirement.toString(),
-                priority: priority.toString(),
-                max_delay: max_delay.toString(),
-                duration: duration.toString(),
-                can_migrate: (can_migrate ? 'true' : 'false')
+            spec: {
+                suspend: true,
+                template: {
+                    spec: {
+                        containers: [{
+                            name: 'task-container',
+                            image: 'gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/dummy-task:latest',
+                            env: [
+                                { name: 'ENERGY_REQUIREMENT', value: energy_requirement.toString() },
+                                { name: 'PRIORITY', value: priority.toString() },
+                                { name: 'MAX_DELAY', value: max_delay.toString() },
+                                { name: 'DURATION', value: duration.toString() }
+                            ]
+                        }],
+                        restartPolicy: 'Never'
+                    }
+                },
+                backoffLimit: 0
             }
         };
         
-        await k8sApi.createNamespacedConfigMap(namespace, configMap);
+        // Maak de batch/v1 API client
+        const batchApi = kc.makeApiClient(k8s.BatchV1Api);
+        
+        // Maak de job
+        await batchApi.createNamespacedJob(namespace, job);
         
         res.status(201).json({ 
             message: 'Taak succesvol aangemaakt',

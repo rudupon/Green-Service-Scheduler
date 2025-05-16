@@ -174,39 +174,51 @@ class NodeController:
             logger.error(f"Fout bij markeren Job als in verwerking: {e}")
     
     def schedule_task(self, task_params, original_job=None):
-        logger.info(f"Planning van taak: {task_params['name']}")
-        self.task_queue.append(task_params)
+        # 1. Eerst een volledige Job aanmaken die direct correct geconfigureerd is
+        # met alle benodigde settings: imagePullSecrets, nodeSelector, etc.
+        job = self.create_job_object(task_params, self.node_name)
         
-        # Controleer of de taak kan migreren
-        if task_params.get('can_migrate', False):
-            best_node, optimal_time_str = self.find_best_node_for_task(task_params)
-        else:
-            # Als migratie niet is toegestaan, gebruik alleen deze node
-            energy_prediction = self.prediction_client.predict_energy()
-            optimal_time_str, _ = self.scheduler_client.find_optimal_time(task_params, energy_prediction)
-            best_node = self.node_name
+        # 2. De Job aanmaken, maar in suspended state
+        job.spec.suspend = True
         
         try:
+            self.batch_api.create_namespaced_job(namespace=self.namespace, body=job)
+            
+            # 3. De beste node en timing bepalen op basis van can_migrate
+            if task_params.get('can_migrate', False):
+                # Zoek beste node als migratie toegestaan is
+                best_node, optimal_time_str = self.find_best_node_for_task(task_params)
+                logger.info(f"Migratie toegestaan, beste node: {best_node}")
+            else:
+                # Gebruik alleen huidige node als migratie niet toegestaan is
+                energy_prediction = self.prediction_client.predict_energy()
+                optimal_time_str, score = self.scheduler_client.find_optimal_time(task_params, energy_prediction)
+                best_node = self.node_name
+                logger.info(f"Migratie niet toegestaan, gebruik huidige node: {best_node}")
+            
+            # 4. Timer instellen voor activatie
+            # Bereken vertraging
+            now = datetime.now()
             optimal_time = datetime.fromisoformat(optimal_time_str)
-        except ValueError:
-            logger.error(f"Ongeldige tijdformaat ontvangen: {optimal_time_str}")
-            optimal_time = datetime.now() + timedelta(seconds=60)  # Fallback naar 1 minuut in de toekomst
-        
-        # Bereken vertraging tot optimaal moment
-        now = datetime.now()
-        if optimal_time > now:
-            delay_seconds = (optimal_time - now).total_seconds()
-        else:
-            delay_seconds = 0
-        
-        logger.info(f"Taak {task_params['name']} ingepland voor uitvoering over {delay_seconds} seconden op node {best_node}")
-        
-        # Start timer voor taakuitvoering
-        timer_thread = threading.Timer(delay_seconds, self.execute_task, args=[task_params, best_node, original_job])
-        timer_thread.daemon = True
-        timer_thread.start()
-        
-        self.timer_threads[task_params['name']] = timer_thread
+            delay_seconds = max(0, (optimal_time - now).total_seconds())
+            
+            logger.info(f"Taak {task_params['name']} ingepland voor uitvoering over {delay_seconds} seconden op node {best_node}")
+            
+            # Start timer voor activatie
+            timer_thread = threading.Timer(
+                delay_seconds, 
+                self.activate_suspended_job, 
+                args=[job.metadata.name, best_node]
+            )
+            timer_thread.daemon = True
+            timer_thread.start()
+            
+            # Sluit job aan timer en taakparameters
+            self.timer_threads[job.metadata.name] = timer_thread
+            self.task_queue.append(task_params)
+            
+        except ApiException as e:
+            logger.error(f"Fout bij aanmaken suspended job voor taak {task_params['name']}: {e}")
 
     def find_best_node_for_task(self, task_params):
         """
@@ -332,7 +344,7 @@ class NodeController:
     
     def execute_task(self, task_params, target_node, original_job=None):
         name = task_params["name"]
-        namespace = task_params["namespace"]
+        namespace = task_params["namespace"]    
         logger.info(f"Uitvoeren van taak: {name} op node: {target_node}")
         
         try:
@@ -341,27 +353,47 @@ class NodeController:
             if name in self.timer_threads:
                 del self.timer_threads[name]
             
-            # Bij een originele job, pas deze aan om uitvoering te starten
+            # Als er een originele job is (vanuit het oude systeem), verwijder deze en maak een nieuwe
             if original_job:
-                self.activate_job(original_job, target_node)
+                try:
+                    # Verwijder de bestaande job en maak een nieuwe met het suspended-model
+                    self.batch_api.delete_namespaced_job(
+                        name=original_job.metadata.name,
+                        namespace=namespace,
+                        body=client.V1DeleteOptions(propagation_policy="Background")
+                    )
+                    logger.info(f"Oude job {original_job.metadata.name} verwijderd")
+                    
+                    # Maak een nieuwe job aan en activeer die direct
+                    job = self.create_job_object(task_params, target_node)
+                    job.spec.suspend = False  # Direct uitvoeren
+                    
+                    self.batch_api.create_namespaced_job(
+                        namespace=namespace,
+                        body=job
+                    )
+                    logger.info(f"Nieuwe job aangemaakt en direct geactiveerd voor taak {name}")
+                    
+                except ApiException as e:
+                    logger.error(f"Fout bij vervangen van oude job: {e}")
             else:
-                # Fallback naar het oude systeem als er geen originele job is
+                # Directe uitvoering zonder suspended job
                 job = self.create_job_object(task_params, target_node)
+                job.spec.suspend = False
+                
                 self.batch_api.create_namespaced_job(
                     namespace=namespace,
                     body=job
                 )
+                logger.info(f"Job direct geactiveerd voor taak {name}")
             
-            logger.info(f"Job geactiveerd voor taak {name} in namespace {namespace} op node {target_node}")
         except ApiException as e:
-            logger.error(f"Fout bij activeren van Job voor taak {name}: {e}")
-    
-    def activate_job(self, job, target_node):
-        name = job.metadata.name
-        namespace = job.metadata.namespace
-        
+            logger.error(f"Fout bij uitvoeren van taak {name}: {e}")
+
+    def activate_suspended_job(self, job_name, node_name):
+        """Alleen de suspend status van de job aanpassen, niet het template."""
         try:
-            # Verwijder 'suspend: true' om uitvoering te starten
+            # Alleen het suspend veld wijzigen, niets anders!
             job_patch = {
                 "spec": {
                     "suspend": False
@@ -373,25 +405,17 @@ class NodeController:
                 }
             }
             
-            # Als de target_node verschilt van de oorspronkelijke, pas node selector aan
-            if 'target-node' in job.metadata.labels and job.metadata.labels['target-node'] != target_node:
-                if not 'template' in job_patch['spec']:
-                    job_patch['spec']['template'] = {}
-                if not 'spec' in job_patch['spec']['template']:
-                    job_patch['spec']['template']['spec'] = {}
-                
-                job_patch['spec']['template']['spec']['nodeSelector'] = {
-                    "kubernetes.io/hostname": target_node
-                }
-            
             # Patch de job
             self.batch_api.patch_namespaced_job(
-                name=name,
-                namespace=namespace,
+                name=job_name,
+                namespace=self.namespace,
                 body=job_patch
             )
+            logger.info(f"Job {job_name} geactiveerd op node {node_name}")
+            
         except ApiException as e:
-            logger.error(f"Fout bij activeren van Job {name}: {e}")
+            logger.error(f"Fout bij activeren van Job {job_name}: {e}")
+    
 
     def create_job_object(self, task_params, target_node):
         job_name = f"{task_params['name']}-{int(time.time())}"
