@@ -88,7 +88,7 @@ class NodeController:
         
         threading.Thread(target=self.check_services_availability, daemon=True).start()
         
-        threading.Thread(target=self.check_configmaps_periodically, daemon=True).start()
+        threading.Thread(target=self.check_jobs_periodically, daemon=True).start()
         
         threading.Thread(target=self._start_flask_server, daemon=True).start()
         
@@ -108,7 +108,7 @@ class NodeController:
                 self.scheduler_client.check_service_available()
             time.sleep(60)  # Check elke minuut
     
-    def check_configmaps_periodically(self):
+    def check_jobs_periodically(self):
         while True:
             try:
                 self.check_for_new_tasks()
@@ -120,55 +120,60 @@ class NodeController:
     def check_for_new_tasks(self):
         logger.info(f"Controleren op nieuwe taken voor node {self.node_name}")
     
-        # Haal ConfigMaps op met label selector voor deze node, maar sluit voorspellingsverzoeken expliciet uit
-        config_maps = self.core_api.list_namespaced_config_map(
+        jobs = self.batch_api.list_namespaced_job(
             namespace="edge-computing",
-            label_selector=f"target-node={self.node_name},processed=false,request-type!=prediction"
+            label_selector=f"type=green-task,status=pending-scheduling,target-node={self.node_name}"
         )
         
-        for config_map in config_maps.items:
+        for job in jobs.items:
             try:
-                self.process_task_configmap(config_map)
+                self.process_task_job(job)
             except Exception as e:
-                logger.error(f"Fout bij verwerken van ConfigMap {config_map.metadata.name}: {e}")
+                logger.error(f"Fout bij verwerken van Job {job.metadata.name}: {e}")
     
-    def process_task_configmap(self, config_map):
-        name = config_map.metadata.name
-        namespace = config_map.metadata.namespace
-        logger.info(f"Verwerken van taak ConfigMap: {name} in namespace {namespace}")
+    def process_task_job(self, job):
+        name = job.metadata.name
+        namespace = job.metadata.namespace
+        logger.info(f"Verwerken van taak Job: {name} in namespace {namespace}")
         
-        # Haal taakparameters op
+        # Haal parameters uit annotaties
+        annotations = job.metadata.annotations if job.metadata.annotations else {}
+        
         task_params = {
             "name": name,
             "namespace": namespace,
-            "energy_requirement": float(config_map.data.get("energy_requirement", "1.0")),
-            "priority": int(config_map.data.get("priority", "1")),
-            "max_delay": int(config_map.data.get("max_delay", "3600")),
-            "duration": int(config_map.data.get("duration", "100")),
+            "energy_requirement": float(annotations.get("energy-requirement", "1.0")),
+            "priority": int(annotations.get("priority", "1")),
+            "max_delay": int(annotations.get("max-delay", "3600")),
+            "duration": int(annotations.get("duration", "100")),
             "created_at": datetime.now().isoformat(),
-            "can_migrate": config_map.data.get("can_migrate", "false").lower() == "true"
+            "can_migrate": job.metadata.labels.get("can-migrate", "false").lower() == "true"
         }
-        self.mark_configmap_as_processed(name, namespace)
-        self.schedule_task(task_params)
+        
+        # Markeer job als 'in behandeling'
+        self.mark_job_as_processing(name, namespace)
+        
+        # Plan de taak in
+        self.schedule_task(task_params, job)
     
-    def mark_configmap_as_processed(self, name, namespace):
+    def mark_job_as_processing(self, name, namespace):
         try:
-            config_map = self.core_api.read_namespaced_config_map(name, namespace)
+            job = self.batch_api.read_namespaced_job(name, namespace)
             
-            if not config_map.metadata.labels:
-                config_map.metadata.labels = {}
-            config_map.metadata.labels["processed"] = "true"
+            if not job.metadata.labels:
+                job.metadata.labels = {}
+            job.metadata.labels["status"] = "processing"
             
-            self.core_api.patch_namespaced_config_map(
+            self.batch_api.patch_namespaced_job(
                 name=name,
                 namespace=namespace,
-                body=config_map
+                body={"metadata": {"labels": job.metadata.labels}}
             )
-            logger.info(f"ConfigMap {name} in namespace {namespace} gemarkeerd als verwerkt")
+            logger.info(f"Job {name} in namespace {namespace} gemarkeerd als in verwerking")
         except ApiException as e:
-            logger.error(f"Fout bij markeren ConfigMap als verwerkt: {e}")
+            logger.error(f"Fout bij markeren Job als in verwerking: {e}")
     
-    def schedule_task(self, task_params):
+    def schedule_task(self, task_params, original_job=None):
         logger.info(f"Planning van taak: {task_params['name']}")
         self.task_queue.append(task_params)
         
@@ -197,7 +202,7 @@ class NodeController:
         logger.info(f"Taak {task_params['name']} ingepland voor uitvoering over {delay_seconds} seconden op node {best_node}")
         
         # Start timer voor taakuitvoering
-        timer_thread = threading.Timer(delay_seconds, self.execute_task, args=[task_params, best_node])
+        timer_thread = threading.Timer(delay_seconds, self.execute_task, args=[task_params, best_node, original_job])
         timer_thread.daemon = True
         timer_thread.start()
         
@@ -325,7 +330,7 @@ class NodeController:
             logger.error(f"Fout bij opvragen voorspelling van node {node_name}: {e}")
             raise TimeoutError(f"Geen antwoord van node {node_name}: {str(e)}")
     
-    def execute_task(self, task_params, target_node):
+    def execute_task(self, task_params, target_node, original_job=None):
         name = task_params["name"]
         namespace = task_params["namespace"]
         logger.info(f"Uitvoeren van taak: {name} op node: {target_node}")
@@ -336,25 +341,70 @@ class NodeController:
             if name in self.timer_threads:
                 del self.timer_threads[name]
             
-            job = self.create_job_object(task_params, target_node)
+            # Bij een originele job, pas deze aan om uitvoering te starten
+            if original_job:
+                self.activate_job(original_job, target_node)
+            else:
+                # Fallback naar het oude systeem als er geen originele job is
+                job = self.create_job_object(task_params, target_node)
+                self.batch_api.create_namespaced_job(
+                    namespace=namespace,
+                    body=job
+                )
             
-            self.batch_api.create_namespaced_job(
-                namespace=namespace,
-                body=job
-            )
-            
-            logger.info(f"Job aangemaakt voor taak {name} in namespace {namespace} op node {target_node}")
+            logger.info(f"Job geactiveerd voor taak {name} in namespace {namespace} op node {target_node}")
         except ApiException as e:
-            logger.error(f"Fout bij aanmaken van Job voor taak {name}: {e}")
+            logger.error(f"Fout bij activeren van Job voor taak {name}: {e}")
     
+    def activate_job(self, job, target_node):
+        name = job.metadata.name
+        namespace = job.metadata.namespace
+        
+        try:
+            # Verwijder 'suspend: true' om uitvoering te starten
+            job_patch = {
+                "spec": {
+                    "suspend": False
+                },
+                "metadata": {
+                    "labels": {
+                        "status": "scheduled"
+                    }
+                }
+            }
+            
+            # Als de target_node verschilt van de oorspronkelijke, pas node selector aan
+            if 'target-node' in job.metadata.labels and job.metadata.labels['target-node'] != target_node:
+                if not 'template' in job_patch['spec']:
+                    job_patch['spec']['template'] = {}
+                if not 'spec' in job_patch['spec']['template']:
+                    job_patch['spec']['template']['spec'] = {}
+                
+                job_patch['spec']['template']['spec']['nodeSelector'] = {
+                    "kubernetes.io/hostname": target_node
+                }
+            
+            # Patch de job
+            self.batch_api.patch_namespaced_job(
+                name=name,
+                namespace=namespace,
+                body=job_patch
+            )
+        except ApiException as e:
+            logger.error(f"Fout bij activeren van Job {name}: {e}")
+
     def create_job_object(self, task_params, target_node):
         job_name = f"{task_params['name']}-{int(time.time())}"
-        
+    
         container = client.V1Container(
             name="task-container",
             image="gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/dummy-task:latest",
             env=[
-                client.V1EnvVar(name="TASK_PARAMS", value=json.dumps(task_params))
+                client.V1EnvVar(name="TASK_NAME", value=task_params['name']),
+                client.V1EnvVar(name="ENERGY_REQUIREMENT", value=str(task_params['energy_requirement'])),
+                client.V1EnvVar(name="PRIORITY", value=str(task_params['priority'])),
+                client.V1EnvVar(name="MAX_DELAY", value=str(task_params['max_delay'])),
+                client.V1EnvVar(name="DURATION", value=str(task_params['duration']))
             ]
         )
         
