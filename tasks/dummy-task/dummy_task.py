@@ -1,5 +1,4 @@
 import os
-import json
 import time
 import logging
 import psutil
@@ -46,23 +45,18 @@ def perform_cpu_intensive_work(duration, intensity=0.8, report_interval=5):
 def main():
     logger.info("Dummy taak gestart")
     
-    task_params_str = os.environ.get("TASK_PARAMS", "{}")
-    try:
-        task_params = json.loads(task_params_str)
-        logger.info(f"Taakparameters ontvangen: {task_params}")
-    except json.JSONDecodeError:
-        logger.error(f"Ongeldige JSON parameters: {task_params_str}")
-        task_params = {}
-    
-    task_name = task_params.get("name", "onbekende-taak")
-    task_duration = int(task_params.get("duration", 60))
-    task_energy = float(task_params.get("energy_requirement", 1.0))
-    task_priority = int(task_params.get("priority", 1))
+    # Haal parameters op als individuele omgevingsvariabelen
+    task_name = os.environ.get("TASK_NAME", "onbekende-taak")
+    task_duration = int(os.environ.get("DURATION", "60"))
+    task_energy = float(os.environ.get("ENERGY_REQUIREMENT", "1.0"))
+    task_priority = int(os.environ.get("PRIORITY", "1"))
+    max_delay = int(os.environ.get("MAX_DELAY", "3600"))
     
     logger.info(f"Taak {task_name} wordt uitgevoerd:")
     logger.info(f"  Prioriteit: {task_priority}")
     logger.info(f"  Energie-eis: {task_energy}")
     logger.info(f"  Geplande duur: {task_duration} seconden")
+    logger.info(f"  Maximale vertraging: {max_delay} seconden")
     logger.info(f"  Starttijd: {datetime.now().isoformat()}")
     
     # Vertaal energie-eis naar CPU-intensiteit (1.0 betekent max energie, dus max CPU)
