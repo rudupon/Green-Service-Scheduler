@@ -14,6 +14,19 @@ logger = logging.getLogger("PredictionService")
 
 app = Flask(__name__)
 
+SAMPLING_INTERVAL = int(os.environ.get('SAMPLING_INTERVAL_SECONDS', '5'))
+FORECAST_HORIZON_MINUTES = 60  # 1 uur voorspelling
+LOOKBACK_WINDOW_MINUTES = 12   # 12 minuten terugkijken
+FORECAST_HORIZON = (FORECAST_HORIZON_MINUTES * 60) // SAMPLING_INTERVAL  # was: 60 * 60 // 5
+LOOKBACK_WINDOW = (LOOKBACK_WINDOW_MINUTES * 60) // SAMPLING_INTERVAL   # was: 12 * 60 // 5
+
+MODEL_TYPE = os.environ.get('MODEL_TYPE', 'baseline_model')
+
+logger.info(f"Prediction Service gestart met:")
+logger.info(f"  Sampling interval: {SAMPLING_INTERVAL}s")
+logger.info(f"  Forecast horizon: {FORECAST_HORIZON} samples ({FORECAST_HORIZON_MINUTES} min)")
+logger.info(f"  Lookback window: {LOOKBACK_WINDOW} samples ({LOOKBACK_WINDOW_MINUTES} min)")
+
 model = None
 model_stats = {}
 
@@ -33,7 +46,15 @@ def measure_resources():
 
 def load_model():
     global model, model_stats
-    model_path = os.path.join('models', 'baseline_model.tflite')
+    if MODEL_TYPE == 'baseline_model':
+        model_path = os.path.join('models', 'baseline_model.tflite')
+    elif MODEL_TYPE == 'dynamic_range':
+        model_path = os.path.join('models', 'lstm_dynamic_range.tflite')
+    elif MODEL_TYPE == 'full_int8':
+        model_path = os.path.join('models', 'lstm_full_int8.tflite')
+    else:
+        logger.warning(f"Onbekend model type: {MODEL_TYPE}, gebruik baseline model")
+        model_path = os.path.join('models', 'baseline_model.tflite')
     
     try:
         if os.path.exists(model_path):
@@ -72,21 +93,15 @@ def load_model():
         logger.error(f"Fout bij het laden van het model: {e}")
         return False
 
-def get_latest_data(seconds=720):
-    """
-    Haalt de meest recente metingen op van de data-service.
-    
-    Parameters:
-        seconds (int): Aantal seconden aan historische data om op te halen
-                      (standaard 720 = 12 minuten)
-    
-    Returns:
-        dict: Dictionary met 'values' en 'timestamps', of None bij fout
-    """
+def get_latest_data(seconds=None):
     try:
-        # Gebruik de Kubernetes service naam voor toegang tot de data-service
-        url = f"http://data-service:5000/latest?seconds={seconds}"
-        logger.info(f"Data ophalen van: {url}")
+        # Forceer ALTIJD exact 720 seconden, ongeacht lokale configuratie
+        required_seconds = 720  # Exact 12 minuten, hard-coded om consistentie te garanderen
+        
+        node_ip = os.environ.get("NODE_IP", "localhost")
+        
+        url = f"http://{node_ip}:30005/latest?seconds={seconds}"
+        logger.info(f"Data ophalen van lokale node via NodePort: {url}")
         
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -94,7 +109,6 @@ def get_latest_data(seconds=720):
         data = response.json()
         logger.info(f"Data opgehaald: {data.get('samples', 0)} samples")
         
-        # Return zowel waarden als timestamps
         return {
             "values": data.get("values", []),
             "timestamps": data.get("timestamps", [])
@@ -114,7 +128,7 @@ def preprocess_data(historical_data=None):
     Returns:
         np.array: Een array van vorm (1, 144, N) met de features voor het model
     """
-    if historical_data is None or 'values' not in historical_data or len(historical_data['values']) < 60:
+    if historical_data is None or 'values' not in historical_data:
         logger.info("Onvoldoende historische data, genereren van synthetische data")
         return generate_synthetic_features()
     
@@ -141,7 +155,8 @@ def preprocess_data(historical_data=None):
         df['dayofweek_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 7)
         
         # 2. Rolling statistics
-        window_samples = [60, 120]  # ~5 min, ~10 min bij 5s samples
+        window_minutes = [5, 10]
+        window_samples = [(w * 60) // SAMPLING_INTERVAL for w in window_minutes]
         
         for window in window_samples:
             df[f'rolling_mean_{window}'] = df['Power_Value'].rolling(window=min(window, len(df)), min_periods=1).mean()
@@ -186,20 +201,19 @@ def preprocess_data(historical_data=None):
         # 6. Controleer op en vul eventuele NaN-waarden
         df_features = df_features.fillna(0)
         
-        # 7. Zorg dat we precies 144 samples hebben (voor LSTM input)
-        if len(df_features) > 144:
-            # Neem alleen de laatste 144 samples
-            df_features = df_features.iloc[-144:].reset_index(drop=True)
-        elif len(df_features) < 144:
-            # Vul aan met nullen aan het begin
-            padding_rows = 144 - len(df_features)
+        # 7. Zorg dat we het juiste aantal samples hebben (voor LSTM input)
+        target_samples = LOOKBACK_WINDOW
+        if len(df_features) > target_samples:
+            df_features = df_features.iloc[-target_samples:].reset_index(drop=True)
+        elif len(df_features) < target_samples:
+            padding_rows = target_samples - len(df_features)
             padding_df = pd.DataFrame(0, index=range(padding_rows), columns=df_features.columns)
             df_features = pd.concat([padding_df, df_features], ignore_index=True)
         
         logger.info(f"Feature engineering voltooid, {len(df_features.columns)} features gegenereerd")
         
         # 8. Converteer naar numpy array geschikt voor LSTM
-        model_input = df_features.values.reshape(1, 144, len(df_features.columns))
+        model_input = df_features.values.reshape(1, target_samples, len(df_features.columns))
         
         return model_input
         
@@ -215,12 +229,12 @@ def generate_synthetic_features():
     logger.info("Genereren van synthetische features")
     
     # Basispatroon (sinusgolf)
-    t = np.linspace(0, 2*np.pi, 144)
+    t = np.linspace(0, 2*np.pi, LOOKBACK_WINDOW)
     power_values = 0.5 + 0.5 * np.sin(t)
     
     # DataFrame maken met synthetische tijdsdata
-    base_time = datetime.now() - timedelta(minutes=12)
-    datetimes = [base_time + timedelta(seconds=5*i) for i in range(144)]
+    base_time = datetime.now() - timedelta(minutes=LOOKBACK_WINDOW_MINUTES)
+    datetimes = [base_time + timedelta(seconds=SAMPLING_INTERVAL*i) for i in range(LOOKBACK_WINDOW)]
     
     df = pd.DataFrame({
         'Datetime': datetimes,
@@ -241,7 +255,8 @@ def generate_synthetic_features():
     df['dayofweek_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 7)
     
     # 2. Rolling statistics
-    window_samples = [60, 120]
+    window_minutes = [5, 10]
+    window_samples = [(w * 60) // SAMPLING_INTERVAL for w in window_minutes]
     for window in window_samples:
         df[f'rolling_mean_{window}'] = df['Power_Value'].rolling(window=min(window, len(df)), min_periods=1).mean()
         df[f'rolling_std_{window}'] = df['Power_Value'].rolling(window=min(window, len(df)), min_periods=1).std().fillna(0)
@@ -255,10 +270,10 @@ def generate_synthetic_features():
         df[f'rolling_position_{window}'] = (df['Power_Value'] - min_vals) / range_vals
     
     # 3. Differentiële features
-    df['time_diff'] = 5  # Constante tijdsverschil van 5s voor synthetische data
+    df['time_diff'] = SAMPLING_INTERVAL
     df['power_diff'] = df['Power_Value'].diff().fillna(0)
-    df['rate_of_change'] = df['power_diff'] / 5
-    df['acceleration'] = df['rate_of_change'].diff().fillna(0) / 5
+    df['rate_of_change'] = df['power_diff'] / SAMPLING_INTERVAL
+    df['acceleration'] = df['rate_of_change'].diff().fillna(0) / SAMPLING_INTERVAL
     
     # 4. Zonne-energie specifieke features
     df['is_daytime'] = ((df['hour'] >= 6) & (df['hour'] <= 20)).astype(float)
@@ -274,7 +289,7 @@ def generate_synthetic_features():
     df_features = df_features.fillna(0)
     
     # Converteer naar numpy array geschikt voor LSTM
-    model_input = df_features.values.reshape(1, 144, len(df_features.columns))
+    model_input = df_features.values.reshape(1, LOOKBACK_WINDOW, len(df_features.columns))
     
     logger.info(f"Synthetische features gegenereerd, vorm: {model_input.shape}")
     return model_input
@@ -282,7 +297,7 @@ def generate_synthetic_features():
 def generate_synthetic_prediction():
     """Genereert een synthetische voorspelling als fallback."""
     logger.info("Genereren van een synthetische voorspelling")
-    t = np.linspace(0, 2*np.pi, 720)  # 1 uur aan 5s samples = 720 punten
+    t = np.linspace(0, 2*np.pi, FORECAST_HORIZON)  # 1 uur aan 5s samples = 720 punten
     prediction = 0.5 + 0.5 * np.sin(t + time.time() % (2*np.pi))
     return prediction.tolist()
 
@@ -318,7 +333,7 @@ def predict():
     - historical_data: Optioneel, lijst met historische metingen
     - timestamp: Huidige timestamp
     
-    Retourneert een lijst met 720 voorspellingen (1 uur aan 5s intervallen)
+    Retourneert een lijst met voorspellingen 1 uur vooruit
     """
     start_resources = measure_resources()
     start_time = time.time()
@@ -336,12 +351,12 @@ def predict():
     phase1_start = time.time()
     if historical_data is None:
         logger.info("Geen historische data meegegeven, ophalen van data-service")
-        historical_data = get_latest_data(seconds=720)
+        historical_data = get_latest_data(seconds=LOOKBACK_WINDOW*SAMPLING_INTERVAL)
     
     if isinstance(historical_data, list):
         historical_data = {
             "values": historical_data,
-            "timestamps": [datetime.fromtimestamp(timestamp - (len(historical_data) - i - 1) * 5).strftime('%Y-%m-%d %H:%M:%S') 
+            "timestamps": [datetime.fromtimestamp(timestamp - (len(historical_data) - i - 1) * SAMPLING_INTERVAL).strftime('%Y-%m-%d %H:%M:%S') 
                          for i in range(len(historical_data))]
         }
         

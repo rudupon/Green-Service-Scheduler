@@ -12,9 +12,89 @@ spec:
       labels:
         app: data-service
     spec:
+      initContainers:
+      - name: fetch-data
+        image: curlimages/curl
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Bepaal het type node op basis van de node name
+          NODE_NAME=$NODE_NAME
+          echo "Node: $NODE_NAME"
+          
+          # Eenvoudige mapping op basis van node naam
+          if echo "$NODE_NAME" | grep -q "75d09997-8f8f-42d2-ab01-md-0-lj2dx-hltf4"; then
+            LOCATION="home"
+            SAMPLING_INTERVAL="5"
+          elif echo "$NODE_NAME" | grep -q "75d09997-8f8f-42d2-ab01-md-0-lj2dx-n7x26"; then
+            LOCATION="tom"
+            SAMPLING_INTERVAL="15"
+          elif echo "$NODE_NAME" | grep -q "75d09997-8f8f-42d2-ab01-md-0-lj2dx-xv7jf"; then
+            LOCATION="ktn"
+            SAMPLING_INTERVAL="60"
+          else
+            echo "Onbekende node: $NODE_NAME"
+            exit 1
+          fi
+          
+          echo "Gedetecteerde configuratie: location=$LOCATION, sampling-interval=$SAMPLING_INTERVAL"
+          echo $SAMPLING_INTERVAL > /app/data/sampling_interval
+          mkdir -p /app/data
+          
+          # Haal token op uit secret
+          TOKEN=$(cat /etc/gitlab-pat/token)
+          
+          # Bereken pad en encoded string
+          FILE_PATH="data/window_${LOCATION}_${SAMPLING_INTERVAL}s.csv"
+          ENCODED_PATH=$(echo $FILE_PATH | sed 's/\//%2F/g')
+          
+          # Download het bestand
+          echo "Downloaden van $FILE_PATH naar /app/data/solar_data.csv"
+          curl -s -H "PRIVATE-TOKEN: $TOKEN" \
+            "https://gitlab.stud.atlantis.ugent.be/api/v4/projects/rdupon%2Fmp/repository/files/$ENCODED_PATH/raw?ref=main" \
+            -o /app/data/solar_data.csv
+          
+          # Controleer of download succesvol was
+          if [ -s /app/data/solar_data.csv ]; then
+            echo "Download succesvol!"
+            echo "--------------------------------------------------------"
+            echo "Eerste 10 regels van het gedownloade bestand:"
+            head -n 10 /app/data/solar_data.csv
+            echo "--------------------------------------------------------"
+            echo "Bestandsgrootte: $(du -h /app/data/solar_data.csv | cut -f1) bytes"
+            echo "Aantal regels: $(wc -l < /app/data/solar_data.csv)"
+          else
+            echo "Download mislukt!"
+            exit 1
+          fi
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: data-volume
+          mountPath: /app/data
+        - name: gitlab-pat
+          mountPath: /etc/gitlab-pat
+          readOnly: true
       containers:
       - name: data-service
         image: gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/data-service:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          # Lees sampling interval uit bestand
+          if [ -f /app/data/sampling_interval ]; then
+            export SAMPLING_INTERVAL_SECONDS=$(cat /app/data/sampling_interval)
+            echo "Sampling interval geladen uit bestand: $SAMPLING_INTERVAL_SECONDS"
+          else
+            echo "Waarschuwing: Sampling interval bestand niet gevonden, gebruik standaardwaarde"
+          fi
+          
+          # Start de applicatie
+          python data_service.py
         ports:
         - containerPort: 5000
         env:
@@ -27,7 +107,7 @@ spec:
         - name: FLASK_PORT
           value: "5000"
         - name: DATA_FILE
-          value: "/app/data/solar_data_cleaned_1-25_april_home.csv"
+          value: "/app/data/solar_data.csv"
         resources:
           limits:
             cpu: "500m"
@@ -35,5 +115,31 @@ spec:
           requests:
             cpu: "100m"
             memory: "256Mi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /app/data
+      volumes:
+      - name: data-volume
+        emptyDir: {}
+      - name: gitlab-pat
+        secret:
+          secretName: gitlab-repo-access
+          items:
+          - key: token
+            path: token
       imagePullSecrets:
         - name: gitlab-ugent-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-service-nodeport
+  namespace: edge-computing
+spec:
+  selector:
+    app: data-service
+  ports:
+  - port: 5000
+    targetPort: 5000
+    nodePort: 30005
+  type: NodePort

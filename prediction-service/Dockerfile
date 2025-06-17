@@ -14,7 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p models
 
 COPY prediction_service.py .
-COPY models/ models/
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000

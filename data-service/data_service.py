@@ -9,6 +9,15 @@ logger = logging.getLogger("DataService")
 
 app = Flask(__name__)
 
+SAMPLING_INTERVAL = int(os.environ.get('SAMPLING_INTERVAL_SECONDS', '5'))
+
+# Dynamisch aantal samples voor 12 minuten berekenen
+LOOKBACK_WINDOW_MINUTES = 12
+LOOKBACK_WINDOW_SAMPLES = int((LOOKBACK_WINDOW_MINUTES * 60) / SAMPLING_INTERVAL)
+
+logger.info(f"Data Service gestart met sampling interval: {SAMPLING_INTERVAL}s")
+logger.info(f"Lookback window: {LOOKBACK_WINDOW_MINUTES} minuten = {LOOKBACK_WINDOW_SAMPLES} samples")
+
 # Globale variabele voor dataset
 df = None
 DATA_FILE = os.environ.get('DATA_FILE', '/app/data/solar_data.csv')
@@ -39,21 +48,28 @@ def health_check():
 @app.route('/latest', methods=['GET'])
 def get_latest_metrics():
     """
-    Endpoint om de laatste metingen op te vragen met een flexibele tijdsduur.
-    Ondersteunt simulatie door data "cyclisch" te maken over seizoenen heen.
-    
-    Query parameters:
-    - seconds: Aantal seconden om terug te kijken (standaard 720 = 12 minuten)
-    - current_time: Optioneel, huidige tijd voor simulatie (standaard: echte huidige tijd)
-    
-    Returns:
-    - JSON met waarden en timestamps
+    Endpoint om de laatste metingen op te vragen.
     """
     if df is None:
         return jsonify({"error": "Dataset niet geladen"}), 500
     
-    # Parameters uit query string
+    # Diagnostische logging behouden
+    node_name = os.environ.get("NODE_NAME", "ONBEKEND")
+    logger.info("=================== DIAGNOSE ===================")
+    logger.info(f"Node naam: {node_name}")
+    logger.info(f"Sampling interval uit omgevingsvariabele: {os.environ.get('SAMPLING_INTERVAL_SECONDS', 'NIET GEZET')}")
+    logger.info(f"SAMPLING_INTERVAL variabele in code: {SAMPLING_INTERVAL}")
+    logger.info(f"Aantal rijen in dataset: {len(df)}")
+    logger.info(f"Dataset tijdsrange: {df['Datetime'].min()} - {df['Datetime'].max()}")
+    logger.info("===============================================")
+    
+    # Aantal seconden dat we moeten teruggeven (standaard 12 minuten)
     seconds = int(request.args.get('seconds', 720))
+    
+    # Bereken het verwachte aantal samples op basis van interval
+    expected_samples = seconds // SAMPLING_INTERVAL
+    
+    logger.info(f"Aanvraag voor {seconds} seconden met interval {SAMPLING_INTERVAL}s, verwacht {expected_samples} samples")
     
     # Bepaal de simulatietijd
     current_time_str = request.args.get('current_time')
@@ -63,7 +79,6 @@ def get_latest_metrics():
         except:
             current_time = datetime.now()
     else:
-        # Gebruik de echte huidige tijd
         current_time = datetime.now()
     
     # Dataset tijdsbereik
@@ -71,62 +86,56 @@ def get_latest_metrics():
     max_date = df['Datetime'].max()
     dataset_span = (max_date - min_date).total_seconds()
     
-    # Adapteer indien buiten bereik (bijvoorbeeld in oktober)
+    # Adapteer indien buiten bereik (cyclische mapping)
     if current_time < min_date or current_time > max_date:
         logger.info(f"Huidige tijd {current_time} valt buiten dataset bereik, cyclische mapping toepassen")
         
-        # Bereken hoeveel tijd we voorbij het einde of voor het begin zijn
         if current_time > max_date:
             seconds_past_end = (current_time - max_date).total_seconds()
         else:
             seconds_past_end = (current_time - min_date).total_seconds() - dataset_span
             
-        # Modulo berekening om cyclisch binnen het dataset bereik te komen
         offset_in_dataset = seconds_past_end % dataset_span
-        
-        # Nieuwe gesimuleerde 'huidige tijd' binnen het dataset bereik
         sim_current_time = min_date + timedelta(seconds=offset_in_dataset)
         
         logger.info(f"Huidige tijd {current_time} wordt omgezet naar gesimuleerde tijd {sim_current_time}")
         current_time = sim_current_time
     
-    # Bereken het startmoment
-    start_time = current_time - timedelta(seconds=seconds)
+    # Genereer tijdstippen waarop we samples willen hebben
+    timestamps = []
+    for i in range(expected_samples):
+        # Begin met huidige tijd en ga terug in stappen van SAMPLING_INTERVAL
+        sample_time = current_time - timedelta(seconds=(i * SAMPLING_INTERVAL))
+        timestamps.append(sample_time)
     
-    # Probleem: start_time kan vóór min_date liggen
-    # Oplossing: split de query indien nodig in twee delen
-    results = []
+    timestamps = sorted(timestamps)  # Sorteer van vroegst naar laatst
     
-    if start_time < min_date:
-        # Deel 1: Vanaf min_date tot current_time
-        filtered_data1 = df[(df['Datetime'] >= min_date) & (df['Datetime'] <= current_time)]
+    # Vind voor elk tijdstip het dichtstbijzijnde datapunt in onze dataset
+    result_values = []
+    result_timestamps = []
+    
+    for target_time in timestamps:
+        # Vind het dichtstbijzijnde tijdstip in onze dataset
+        closest_idx = df['Datetime'].sub(target_time).abs().idxmin()
+        closest_row = df.iloc[closest_idx]
         
-        # Deel 2: Van het einde van de dataset, de resterende tijd
-        remaining_seconds = (min_date - start_time).total_seconds()
-        end_part_start = max_date - timedelta(seconds=remaining_seconds)
-        filtered_data2 = df[df['Datetime'] >= end_part_start]
-        
-        # Combineer (eerst deel 2, dan deel 1 voor chronologische volgorde)
-        results = pd.concat([filtered_data2, filtered_data1])
-    else:
-        # Normale situatie: alles binnen het dataset bereik
-        results = df[(df['Datetime'] >= start_time) & (df['Datetime'] <= current_time)]
+        # Zorg voor native Python types (niet numpy types)
+        result_values.append(float(closest_row['Power_Value']))
+        result_timestamps.append(closest_row['Datetime'])
     
-    if results.empty:
-        logger.warning(f"Geen data gevonden voor periode {start_time} tot {current_time}")
-        return jsonify({"error": "Geen data gevonden voor opgegeven periode"}), 404
+    # Log het resultaat
+    logger.info(f"RESULTAAT: {len(result_values)} samples gegenereerd met interval {SAMPLING_INTERVAL}s")
     
-    # Structureer de data als een lijst met waarden
+    # Maak de response
     response = {
-        "values": results['Power_Value'].tolist(),
-        "timestamps": results['Datetime'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist(),
-        "start_time": start_time.isoformat(),
-        "current_time": current_time.isoformat(),
-        "real_time": datetime.now().isoformat(),
-        "samples": len(results)
+        "values": result_values,
+        "timestamps": [ts.strftime('%Y-%m-%d %H:%M:%S') for ts in result_timestamps],
+        "node_name": node_name,
+        "samples": len(result_values),
+        "expected_samples": expected_samples,
+        "sampling_interval": SAMPLING_INTERVAL
     }
     
-    logger.info(f"Laatste metingen opgehaald: {len(results)} samples")
     return jsonify(response)
 
 if __name__ == '__main__':

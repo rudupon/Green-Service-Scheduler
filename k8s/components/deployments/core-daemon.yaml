@@ -13,9 +13,108 @@ spec:
         app: edge-node-services
     spec:
       serviceAccountName: node-controller
+      initContainers:
+      - name: fetch-model
+        image: curlimages/curl
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Bepaal het type node op basis van de node name
+          NODE_NAME=$NODE_NAME
+          echo "Node: $NODE_NAME"
+          
+          # Eenvoudige mapping op basis van node naam
+          if echo "$NODE_NAME" | grep -q "75d09997-8f8f-42d2-ab01-md-0-lj2dx-hltf4"; then
+            LOCATION="home"
+            SAMPLING_INTERVAL="5"
+          elif echo "$NODE_NAME" | grep -q "75d09997-8f8f-42d2-ab01-md-0-lj2dx-n7x26"; then
+            LOCATION="tom"
+            SAMPLING_INTERVAL="15"
+          elif echo "$NODE_NAME" | grep -q "75d09997-8f8f-42d2-ab01-md-0-lj2dx-xv7jf"; then
+            LOCATION="ktn"
+            SAMPLING_INTERVAL="60"
+          else
+            echo "Onbekende node: $NODE_NAME"
+            exit 1
+          fi
+          
+          echo "Gedetecteerde configuratie: location=$LOCATION, sampling-interval=$SAMPLING_INTERVAL"
+          echo $SAMPLING_INTERVAL > /app/models/sampling_interval
+          mkdir -p /app/models
+          
+          # Haal token op uit secret
+          TOKEN=$(cat /etc/gitlab-pat/token)
+          
+          # Functie om een model te downloaden
+          download_model() {
+            MODEL_TYPE=$1
+            DEST_FILE=$2
+            
+            FILE_PATH="models/lstm_${MODEL_TYPE}_${SAMPLING_INTERVAL}s.tflite"
+            ENCODED_PATH=$(echo $FILE_PATH | sed 's/\//%2F/g')
+            
+            echo "Downloaden van $FILE_PATH naar $DEST_FILE"
+            curl -s -H "PRIVATE-TOKEN: $TOKEN" \
+              "https://gitlab.stud.atlantis.ugent.be/api/v4/projects/rdupon%2Fmp/repository/files/$ENCODED_PATH/raw?ref=main" \
+              -o $DEST_FILE
+            
+            # Controleer of download succesvol was
+            if [ -s "$DEST_FILE" ]; then
+              echo "Download van $MODEL_TYPE model succesvol!"
+              return 0
+            else
+              echo "Download van $MODEL_TYPE model mislukt!"
+              return 1
+            fi
+          }
+          
+          # Download alle modelvarianten
+          MODELS_OK=0
+          
+          # Baseline model (wordt standaard gebruikt)
+          download_model "baseline_model" "/app/models/baseline_model.tflite" && MODELS_OK=$((MODELS_OK+1))
+          
+          # Dynamic range model
+          download_model "dynamic_range" "/app/models/lstm_dynamic_range.tflite" && MODELS_OK=$((MODELS_OK+1))
+          
+          # Full INT8 model
+          download_model "full_int8" "/app/models/lstm_full_int8.tflite" && MODELS_OK=$((MODELS_OK+1))
+          
+          # Controleer of tenminste één model succesvol is gedownload
+          if [ $MODELS_OK -eq 0 ]; then
+            echo "Fout: Geen enkel model kon worden gedownload!"
+            exit 1
+          else
+            echo "Succesvol $MODELS_OK modellen gedownload"
+          fi
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: model-volume
+          mountPath: /app/models
+        - name: gitlab-pat
+          mountPath: /etc/gitlab-pat
+          readOnly: true
       containers:
       - name: node-controller
         image: gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/node-controller:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          # Lees sampling interval uit bestand
+          if [ -f /app/models/sampling_interval ]; then
+            export SAMPLING_INTERVAL_SECONDS=$(cat /app/models/sampling_interval)
+            echo "Sampling interval geladen uit bestand: $SAMPLING_INTERVAL_SECONDS"
+          else
+            echo "Waarschuwing: Sampling interval bestand niet gevonden, gebruik standaardwaarde"
+          fi
+          
+          # Start de applicatie
+          python node_controller.py
         ports:
         - containerPort: 8002
           name: http
@@ -39,9 +138,25 @@ spec:
           requests:
             cpu: "100m"
             memory: "128Mi"
+        volumeMounts:
+        - name: model-volume
+          mountPath: /app/models
 
       - name: scheduler-service
         image: gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/scheduler-service:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          # Lees sampling interval uit bestand
+          if [ -f /app/models/sampling_interval ]; then
+            export SAMPLING_INTERVAL_SECONDS=$(cat /app/models/sampling_interval)
+            echo "Sampling interval geladen uit bestand: $SAMPLING_INTERVAL_SECONDS"
+          else
+            echo "Waarschuwing: Sampling interval bestand niet gevonden, gebruik standaardwaarde"
+          fi
+          
+          # Start de applicatie
+          python scheduler_service.py
         ports:
         - containerPort: 8001
         env:
@@ -60,9 +175,25 @@ spec:
           requests:
             cpu: "100m"
             memory: "256Mi"
+        volumeMounts:
+        - name: model-volume
+          mountPath: /app/models
     
       - name: prediction-service
         image: gitlab.stud.atlantis.ugent.be:5050/rdupon/mp/prediction-service:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          # Lees sampling interval uit bestand
+          if [ -f /app/models/sampling_interval ]; then
+            export SAMPLING_INTERVAL_SECONDS=$(cat /app/models/sampling_interval)
+            echo "Sampling interval geladen uit bestand: $SAMPLING_INTERVAL_SECONDS"
+          else
+            echo "Waarschuwing: Sampling interval bestand niet gevonden, gebruik standaardwaarde"
+          fi
+          
+          # Start de applicatie
+          python prediction_service.py
         ports:
         - containerPort: 8000
         env:
@@ -74,6 +205,12 @@ spec:
           value: "prediction_service.py"
         - name: FLASK_PORT
           value: "8000"
+        - name: MODEL_TYPE
+          value: "baseline_model"  # (baseline_model, dynamic_range, full_int8)
+        - name: NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
         resources:
           limits:
             cpu: "500m"
@@ -81,6 +218,18 @@ spec:
           requests:
             cpu: "200m"
             memory: "512Mi"
+        volumeMounts:
+        - name: model-volume
+          mountPath: /app/models
 
+      volumes:
+      - name: model-volume
+        emptyDir: {}
+      - name: gitlab-pat
+        secret:
+          secretName: gitlab-repo-access
+          items:
+          - key: token
+            path: token
       imagePullSecrets:
         - name: gitlab-ugent-registry

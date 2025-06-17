@@ -9,6 +9,9 @@ logger = logging.getLogger("SchedulerService")
 
 app = Flask(__name__)
 
+SAMPLING_INTERVAL = int(os.environ.get('SAMPLING_INTERVAL_SECONDS', '5'))
+logger.info(f"Scheduler Service gestart met sampling interval: {SAMPLING_INTERVAL}s")
+
 @app.route("/health", methods=["GET"])
 def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
@@ -41,11 +44,11 @@ def schedule_task():
 
 def find_optimal_execution_time(task_params, energy_prediction):
     """
-    Verbeterd algoritme dat het optimale uitvoeringsmoment bepaalt.
+    Algoritme dat het optimale uitvoeringsmoment bepaalt.
     
     Parameters:
     - task_params: Dict met taakparameters (energy_requirement, priority, max_delay, duration)
-    - energy_prediction: List met voorspelde energiebeschikbaarheid (1 uur vooruit, 5 seconden granulariteit)
+    - energy_prediction: List met voorspelde energiebeschikbaarheid (1 uur vooruit, dynamische granulariteit)
     
     Returns:
     - ISO-geformatteerde string met optimale uitvoeringstijd
@@ -54,10 +57,10 @@ def find_optimal_execution_time(task_params, energy_prediction):
     energy_requirement = float(task_params.get('energy_requirement', 1.0))
     priority = int(task_params.get('priority', 1))
     max_delay_seconds = int(task_params.get('max_delay', 3600))  # standaard max 1 uur uitstel
-    duration_seconds = max(int(task_params.get('duration', 100)), 5)  # minimum 5 seconden (1 sample)
+    duration_seconds = max(int(task_params.get('duration', 100)), SAMPLING_INTERVAL)  # minimum 1 sample interval
     
-    # Bereken hoeveel datapunten nodig zijn voor de taakduur (bij 5s granulariteit)
-    duration_samples = max(1, duration_seconds // 5)  # Minimum 1 sample
+    # Bereken hoeveel datapunten nodig zijn voor de taakduur
+    duration_samples = max(1, duration_seconds // SAMPLING_INTERVAL)  # Minimum 1 sample
     energy_array = np.array(energy_prediction)
     
     # Controleer of we genoeg voorspellingen hebben
@@ -65,7 +68,7 @@ def find_optimal_execution_time(task_params, energy_prediction):
         raise ValueError(f"Niet genoeg energie-voorspellingen voor taakduur van {duration_seconds} seconden")
     
     # Max aantal stappen dat we vooruit kunnen kijken (beperkt door max_delay en voorspellingslengte)
-    max_steps = max(1, min(max_delay_seconds // 5, len(energy_array) - duration_samples))
+    max_steps = max(1, min(max_delay_seconds // SAMPLING_INTERVAL, len(energy_array) - duration_samples))
     
     # Bereken de optimale startindex door rekening te houden met energy_requirement
     best_score = -float('inf')
@@ -80,7 +83,7 @@ def find_optimal_execution_time(task_params, energy_prediction):
         
         # Bereken scores op een beter gebalanceerde manier
         avg_energy_ratio = np.mean(window) / energy_requirement  # Hoe hoger boven minimum, hoe beter
-        delay_factor = 1.0 - (start_idx * 5 / max_delay_seconds)  # 1.0 bij start, aflopend naar 0.0
+        delay_factor = 1.0 - (start_idx * SAMPLING_INTERVAL / max_delay_seconds)  # 1.0 bij start, aflopend naar 0.0
         
         # Bepaal gewichten op basis van prioriteit (1-10)
         priority_normalized = priority / 10.0  # Normaliseren naar 0.1-1.0
@@ -101,7 +104,7 @@ def find_optimal_execution_time(task_params, energy_prediction):
         best_start_index, best_score = find_best_fallback(energy_array, duration_samples, max_steps, energy_requirement, priority)
     
     # Bereken optimale tijd (huidige tijd + beste start in seconden)
-    optimal_seconds = best_start_index * 5
+    optimal_seconds = best_start_index * SAMPLING_INTERVAL
     optimal_time = datetime.now() + timedelta(seconds=optimal_seconds)
     
     logger.info(f"Optimale tijd voor taak: {optimal_time.isoformat()}, score: {best_score:.4f}")
@@ -123,7 +126,7 @@ def find_best_fallback(energy_array, duration_samples, max_steps, energy_require
         # Dezelfde prioriteitslogica toepassen als in de hoofdfunctie
         priority_normalized = priority / 10.0  # Normaliseren naar 0.1-1.0
         energy_weight = 1.0 - priority_normalized  # Lager bij hoge prioriteit
-        delay_factor = 1.0 - (start_idx * 5 / max_steps)  # 1.0 bij start, aflopend naar 0.0
+        delay_factor = 1.0 - (start_idx * SAMPLING_INTERVAL / max_steps)  # 1.0 bij start, aflopend naar 0.0
         delay_weight = priority_normalized  # Hoger bij hoge prioriteit
         
         # Consistente score berekening met de hoofdfunctie

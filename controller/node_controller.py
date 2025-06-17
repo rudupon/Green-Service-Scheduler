@@ -13,6 +13,8 @@ import requests
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("NodeController")
 
+POLLING_INTERVAL = 5
+
 class NodeController:
     def __init__(self):
         config.load_incluster_config()
@@ -28,6 +30,7 @@ class NodeController:
         self.controller_port = int(os.environ.get("CONTROLLER_PORT", "8002"))
         
         logger.info(f"Node Controller gestart op node: {self.node_name}")
+        logger.info(f"  Polling interval: {POLLING_INTERVAL}s")
         
         self.task_queue = []
         self.timer_threads = {}
@@ -115,7 +118,7 @@ class NodeController:
             except Exception as e:
                 logger.error(f"Fout bij controleren van nieuwe taken: {e}")
             
-            time.sleep(5)
+            time.sleep(POLLING_INTERVAL)
     
     def check_for_new_tasks(self):
         logger.info(f"Controleren op nieuwe taken voor node {self.node_name}")
