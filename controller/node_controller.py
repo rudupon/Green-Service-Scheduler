@@ -262,7 +262,7 @@ class NodeController:
         # Voor elke andere node, voorspellingen opvragen via HTTP
         for node in nodes:
             if node == self.node_name:
-                continue  # Skip huidige node, die hebben we al
+                continue  # Skip huidige node
             
             try:
                 # Voorspelling opvragen van andere node via HTTP
@@ -339,8 +339,8 @@ class NodeController:
             # Verwerk antwoord
             data = response.json()
             logger.info(f"Voorspelling ontvangen van node {node_name}")
-            
             return data.get('prediction', []), data.get('optimal_time', ''), float(data.get('score', 0))
+        
         except requests.exceptions.RequestException as e:
             logger.error(f"Fout bij opvragen voorspelling van node {node_name}: {e}")
             raise TimeoutError(f"Geen antwoord van node {node_name}: {str(e)}")
@@ -356,7 +356,7 @@ class NodeController:
             if name in self.timer_threads:
                 del self.timer_threads[name]
             
-            # Als er een originele job is (vanuit het oude systeem), verwijder deze en maak een nieuwe
+            # Als er een originele job is, verwijder deze en maak een nieuwe
             if original_job:
                 try:
                     # Verwijder de bestaande job en maak een nieuwe met het suspended-model

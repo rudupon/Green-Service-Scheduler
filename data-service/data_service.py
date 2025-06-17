@@ -53,7 +53,7 @@ def get_latest_metrics():
     if df is None:
         return jsonify({"error": "Dataset niet geladen"}), 500
     
-    # Diagnostische logging behouden
+    # Logging
     node_name = os.environ.get("NODE_NAME", "ONBEKEND")
     logger.info("=================== DIAGNOSE ===================")
     logger.info(f"Node naam: {node_name}")
@@ -63,7 +63,7 @@ def get_latest_metrics():
     logger.info(f"Dataset tijdsrange: {df['Datetime'].min()} - {df['Datetime'].max()}")
     logger.info("===============================================")
     
-    # Aantal seconden dat we moeten teruggeven (standaard 12 minuten)
+    # Aantal seconden terug te geven (standaard 12 minuten)
     seconds = int(request.args.get('seconds', 720))
     
     # Bereken het verwachte aantal samples op basis van interval
@@ -86,7 +86,7 @@ def get_latest_metrics():
     max_date = df['Datetime'].max()
     dataset_span = (max_date - min_date).total_seconds()
     
-    # Adapteer indien buiten bereik (cyclische mapping)
+    # Pas aan indien buiten bereik (cyclische mapping)
     if current_time < min_date or current_time > max_date:
         logger.info(f"Huidige tijd {current_time} valt buiten dataset bereik, cyclische mapping toepassen")
         
@@ -101,7 +101,7 @@ def get_latest_metrics():
         logger.info(f"Huidige tijd {current_time} wordt omgezet naar gesimuleerde tijd {sim_current_time}")
         current_time = sim_current_time
     
-    # Genereer tijdstippen waarop we samples willen hebben
+    # Genereer tijdstippen waarop samples nodig zijn
     timestamps = []
     for i in range(expected_samples):
         # Begin met huidige tijd en ga terug in stappen van SAMPLING_INTERVAL
@@ -110,23 +110,20 @@ def get_latest_metrics():
     
     timestamps = sorted(timestamps)  # Sorteer van vroegst naar laatst
     
-    # Vind voor elk tijdstip het dichtstbijzijnde datapunt in onze dataset
+    # Vind voor elk tijdstip het dichtstbijzijnde datapunt in dataset
     result_values = []
     result_timestamps = []
     
     for target_time in timestamps:
-        # Vind het dichtstbijzijnde tijdstip in onze dataset
+        # Vind het dichtstbijzijnde tijdstip in dataset
         closest_idx = df['Datetime'].sub(target_time).abs().idxmin()
         closest_row = df.iloc[closest_idx]
         
-        # Zorg voor native Python types (niet numpy types)
         result_values.append(float(closest_row['Power_Value']))
         result_timestamps.append(closest_row['Datetime'])
     
-    # Log het resultaat
     logger.info(f"RESULTAAT: {len(result_values)} samples gegenereerd met interval {SAMPLING_INTERVAL}s")
     
-    # Maak de response
     response = {
         "values": result_values,
         "timestamps": [ts.strftime('%Y-%m-%d %H:%M:%S') for ts in result_timestamps],
